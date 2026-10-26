@@ -1,9 +1,9 @@
 import { useState } from "react";
 
 
-function RetryModal({ failedPdfs, onConfirm, onCancel }) {
+function RetryModal({ failedPdfs, onConfirm, onCancel, identityField }) {
   const [selected, setSelected] = useState(
-    failedPdfs.filter((f) => !f.retried).map((f) => f.filename || f.folder_name)
+    failedPdfs.filter((f) => !f.retried).map((f) => identityField ? f[identityField] : (f.filename || f.folder_name))
   );
   const toggle = (name) =>
     setSelected((prev) => prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]);
@@ -21,7 +21,7 @@ function RetryModal({ failedPdfs, onConfirm, onCancel }) {
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: "4px", maxHeight: "300px", overflowY: "auto" }}>
           {failedPdfs.map((f) => {
-            const name = f.filename || f.folder_name;
+            const name = identityField ? f[identityField] : (f.filename || f.folder_name);
             return (
               <label key={name} style={{
                 display: "flex", alignItems: "flex-start", gap: "10px",
@@ -33,7 +33,7 @@ function RetryModal({ failedPdfs, onConfirm, onCancel }) {
                 <input type="checkbox" disabled={f.retried} checked={selected.includes(name)} onChange={() => toggle(name)} style={{ marginTop: "2px", accentColor: "var(--color-accent)" }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--color-text)", wordBreak: "break-all" }}>
-                    {name}{f.retried && <span style={{ color: "var(--color-success)", marginLeft: "8px" }}>✓ already retried</span>}
+                    {f.filename || f.folder_name}{f.retried && <span style={{ color: "var(--color-success)", marginLeft: "8px" }}>✓ already retried</span>}
                   </div>
                   {f.reason && <div style={{ fontFamily: "var(--font-body)", fontSize: "10px", color: "var(--color-muted)", marginTop: "2px" }}>{f.reason}</div>}
                 </div>

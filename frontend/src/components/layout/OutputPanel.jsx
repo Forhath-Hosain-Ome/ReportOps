@@ -119,7 +119,7 @@ export default function OutputPanel() {
             <EmptyState />
           ) : output.source === "audit" ? (
             <AuditOutput output={output} />
-          ) : output.type === "batch" || output.type === "batch-list" || output.type === "logs" || output.type === "batch-progress" ? (
+          ) : output.type === "batch" || output.type === "batch-list" || output.type === "logs" || output.type === "batch-progress" || output.type === "image-settings" ? (
             <BatchOutput output={output} />
           ) : output.type === "report" || output.type === "report-list" ? (
             <ReportOutput output={output} />

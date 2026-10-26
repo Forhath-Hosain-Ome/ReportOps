@@ -11,6 +11,8 @@ import { Btn, Section, Stat, StatGrid } from "../primitives/index";
 import UploadForm from "./UploadForm";
 import BatchList from "./BatchList";
 import { STATUS_COLOR } from "../constants"
+import RetryModal from "./RetryModal";
+import { fetchBatch as fetchBatchImage, retryBatch as retryBatchImage, fetchBatchLogs } from "../services/defectImageApi";
 import ReportCertBtn from "./ReportCertBtn";
 
 
@@ -23,7 +25,9 @@ export default function BatchDetail({ data, source = "puma" }) {
   const color         = STATUS_COLOR[data?.status] || "var(--color-muted)";
   const failedRecords = data?.failed_folder_records || data?.failed_pdf_records || [];
   const failedCount   = data?.failed_folders_count ?? data?.failed_pdfs_count ?? failedRecords.length;
-  const hasRetryable  = failedRecords.some((f) => !f.retried);
+  const retryReports = isImage ? (data?.reports || []).filter((r) => ["FAILED", "PARTIAL"].includes(r.status)) : failedRecords;
+  const hasRetryable = isImage ? retryReports.length > 0 : failedRecords.some((f) => !f.retried);
+  const recoverDispatch = isImage && (["FAILED", "UNKNOWN"].includes(data?.dispatch_state) || (data?.status === "PROCESSING" && data?.lease_expires_at && new Date(data.lease_expires_at) <= new Date()));
   const canRetry      = (data?.status === "PARTIAL" || data?.status === "FAILED") && hasRetryable;
 
   const total     = data?.total_folders ?? data?.total_pdfs ?? 0;
@@ -31,7 +35,13 @@ export default function BatchDetail({ data, source = "puma" }) {
 
   const handleRetryConfirm = async (names) => {
     setShowRetryModal(false);
-    if (isImage) { addLog({ level: "warning", message: "Retry is not supported for image batches yet." }); return; }
+    if (isImage) {
+      try {
+        await retryBatchImage(data.id, names);
+        setOutput("batch", await fetchBatchImage(data.id), `Batch #${data.id}`, { source: "image" });
+      } catch (e) { addLog({ level: "error", message: e.response?.data?.detail || e.message }); }
+      return;
+    }
     addLog({ level: "info", message: `Retrying ${names.length} item(s) in Batch #${data.id}…` });
     try {
       const res = await retryBatchPuma(data.id, names);
@@ -57,7 +67,7 @@ export default function BatchDetail({ data, source = "puma" }) {
   return (
     <div className="fade-up" style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
       {showRetryModal && (
-        <RetryModal failedPdfs={failedRecords} onConfirm={handleRetryConfirm} onCancel={() => setShowRetryModal(false)} />
+        <RetryModal failedPdfs={retryReports} identityField={isImage ? "id" : undefined} onConfirm={handleRetryConfirm} onCancel={() => setShowRetryModal(false)} />
       )}
       <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
         <h2 style={{ fontFamily: "var(--font-display)", fontSize: "18px", fontWeight: 700, margin: 0 }}>
@@ -72,7 +82,9 @@ export default function BatchDetail({ data, source = "puma" }) {
           </span>
         )}
         <div style={{ flex: 1 }} />
+        {isImage && <Btn onClick={async () => { try { setOutput("logs", await fetchBatchLogs(data.id), `Logs · Batch #${data.id}`, { source: "image", batchId: data.id }); } catch (e) { addLog({ level: "error", message: e.message }); } }}>Logs and retry history</Btn>}
         {data?.excel_available && <Btn onClick={handleExcel} accent>⬇ Excel</Btn>}
+        {recoverDispatch && <Btn onClick={() => handleRetryConfirm()}>Recover dispatch</Btn>}
         {canRetry && <Btn onClick={() => setShowRetryModal(true)}>↺ Retry Failed</Btn>}
       </div>
 
@@ -81,10 +93,12 @@ export default function BatchDetail({ data, source = "puma" }) {
           ["Total",       total],
           ["Processed",   processed],
           ["Failed",      failedCount],
+          ...(isImage ? [["Partial", data.partial_reports], ["Submitted images", data.submitted_images], ["Successful images", data.successful_images], ["Failed images", data.failed_images]] : []),
           ["Success",     `${data?.success_rate}%`],
         ].map(([label, val]) => <Stat key={label} label={label} value={val} />)}
       </div>
 
+      {isImage && <p role="status">{data.dispatch_state} {data.last_error_code} {data.error_log}</p>}
       {failedRecords.length > 0 && (
         <Section title="Failed Items">
           {failedRecords.map((f) => (
@@ -111,7 +125,7 @@ export default function BatchDetail({ data, source = "puma" }) {
                 <span style={{ color: "var(--color-muted)", fontSize: "10px", flex: 1 }}>
                   {r.image_count ? `${r.image_count} images` : (r.po_numbers?.map((p) => p.number).join(", "))}
                 </span>
-                <ReportCertBtn reportId={r.id} styleName={r.folder_name || r.style} pdfFilename={r.pdf_filename} source={source} />
+                {(!isImage || r.current_attempt_id) && <ReportCertBtn reportId={r.id} styleName={r.folder_name || r.style} pdfFilename={r.pdf_filename} source={source} />}
               </div>
             ))}
           </div>

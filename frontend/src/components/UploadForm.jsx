@@ -19,6 +19,9 @@ export default function UploadForm({ initData = {}, source = "puma" }) {
     return d.toISOString().slice(0, 10);
   };
   const { addLog, setOutput, setLoading } = useOutputStore();
+  const uploadLock = useRef(false);
+  const [uploading, setUploading] = useState(false);
+  const [selectionErrors, setSelectionErrors] = useState([]);
   const [files, setFiles]       = useState([]);
   const [date, setDate]         = useState(initData.date || getDefaultDate());
   const [style, setStyle]       = useState(initData.style || "");
@@ -50,18 +53,21 @@ export default function UploadForm({ initData = {}, source = "puma" }) {
 
   // Process a FileList (from input or DataTransfer), preserving webkitRelativePath
   const processFileList = useCallback((fileList) => {
+    if (uploadLock.current) return;
     const accepted = [];
+    const rejected = [];
     const validExts = isImageUpload
       ? new Set([".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".webp"])
       : new Set([".pdf"]);
 
     for (const file of fileList) {
       const ext = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
-      if (validExts.has(ext) && file.size > 0) {
+      if (validExts.has(ext) && file.size > 0 && file.size <= 50 * 1024 * 1024) {
         accepted.push(file);
-      }
+      } else { rejected.push(`${file.name}: unsupported, empty, or larger than 50 MB`); }
     }
-    if (accepted.length > 0) setFiles(accepted);
+    setSelectionErrors(rejected);
+    if (accepted.length > 0) setFiles((previous) => isImageUpload ? [...new Map([...previous, ...accepted].map((f) => [f.webkitRelativePath || f.name, f])).values()] : accepted);
   }, [isImageUpload]);
 
   // ── Drag-and-drop ─────────────────────────────────────────────────────────
@@ -78,6 +84,7 @@ export default function UploadForm({ initData = {}, source = "puma" }) {
   }, []);
 
   const handleDrop = useCallback((e) => {
+    if (uploadLock.current) { e.preventDefault(); return; }
     e.preventDefault();
     e.stopPropagation();
     setIsDragOver(false);
@@ -145,7 +152,7 @@ export default function UploadForm({ initData = {}, source = "puma" }) {
     for (const f of files) {
       const rel  = f.webkitRelativePath || f.name;
       const parts = rel.split("/");
-      const folder = parts.length > 1 ? parts[0] : "(root)";
+      const folder = parts.length > 1 ? parts.slice(0, -1).join("/") : "(root)";
       if (!byFolder[folder]) byFolder[folder] = 0;
       byFolder[folder]++;
     }
@@ -154,7 +161,9 @@ export default function UploadForm({ initData = {}, source = "puma" }) {
 
   // ── Upload handler ────────────────────────────────────────────────────────
   const handleUpload = async () => {
-    if (!files.length || batchId) return;
+    if (!files.length || batchId || uploadLock.current) return;
+    uploadLock.current = true;
+    setUploading(true);
     setLoading(true);
 
     addLog({
@@ -195,10 +204,11 @@ export default function UploadForm({ initData = {}, source = "puma" }) {
         message: `Upload failed: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`,
       });
       setLoading(false);
-    }
+    } finally { uploadLock.current = false; setUploading(false); }
   };
 
   useWsProgress(batchId, {
+    source,
     onProgress: (msg) => {
       const p = { processed: msg.processed, total: msg.total, percent: msg.progress_percent, stage: msg.stage };
       setProgress(p);
@@ -209,7 +219,7 @@ export default function UploadForm({ initData = {}, source = "puma" }) {
       const p = { processed: msg.processed, total: msg.total, percent: 100, stage: "DONE" };
       setProgress(p);
       syncStore({ progress: p });
-      addLog({ level: "success", message: `Batch #${msg.batch_id} complete — ${msg.report_count} report(s) saved` });
+      addLog({ level: "success", message: `Batch #${msg.batch_id} ${msg.status} — ${msg.report_count} report(s) saved` });
       if (msg.failed > 0)
         addLog({ level: "warning", message: `${msg.failed} folder(s) failed in Batch #${msg.batch_id}` });
       const full = await serviceFetchBatchRef.current(msg.batch_id);
@@ -222,6 +232,25 @@ export default function UploadForm({ initData = {}, source = "puma" }) {
       syncStore({ progress: null });
     },
   });
+
+  useEffect(() => {
+    if (!batchId || source !== "image") return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const full = await serviceFetchBatchRef.current(batchId);
+        if (cancelled) return;
+        setProgress({ processed: full.processed_folders, total: full.total_folders,
+          percent: full.progress_percent, stage: full.dispatch_state });
+        if (["COMPLETED", "PARTIAL", "FAILED"].includes(full.status) || ["FAILED", "UNKNOWN"].includes(full.dispatch_state)) {
+          setOutput("batch", full, `Batch #${batchId}`, { source });
+          setBatch(null);
+        }
+      } catch (error) { if (!cancelled) addLog({ level: "error", message: error.message }); }
+    };
+    const timer = setInterval(poll, 2000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [batchId, source, setOutput, addLog]);
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -296,6 +325,7 @@ export default function UploadForm({ initData = {}, source = "puma" }) {
         <div style={{ display: "flex", gap: "8px", justifyContent: "center", flexWrap: "wrap" }}>
           {isImageUpload && (
             <button
+              disabled={uploading || !!batchId}
               onClick={() => {
                 // Set webkitdirectory imperatively — avoids React JSX limitation
                 const input = folderInputRef.current;
@@ -311,6 +341,7 @@ export default function UploadForm({ initData = {}, source = "puma" }) {
             </button>
           )}
           <button
+            disabled={uploading || !!batchId}
             onClick={() => fileInputRef.current?.click()}
             style={pickBtnStyle}
           >
@@ -355,6 +386,7 @@ export default function UploadForm({ initData = {}, source = "puma" }) {
         </div>
       )}
 
+      {selectionErrors.length > 0 && <div role="alert">{selectionErrors.map((message) => <p key={message}>{message}</p>)}</div>}
       {/* Folder/file preview */}
       {folderSummary && Object.keys(folderSummary).length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
@@ -413,7 +445,7 @@ export default function UploadForm({ initData = {}, source = "puma" }) {
       {/* Upload button */}
       <button
         onClick={handleUpload}
-        disabled={!files.length || !!batchId}
+        disabled={!files.length || !!batchId || uploading}
         style={{
           background: files.length && !batchId ? "var(--color-accent)" : "var(--color-border)",
           color: files.length && !batchId ? "#fff" : "var(--color-muted)",
