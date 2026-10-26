@@ -23,6 +23,12 @@ DELIVERABLE = {"COMPLETED", "PARTIAL"}
 LEASE_SECONDS = 1800  # Exceeds the existing 1500 second hard task deadline.
 
 
+def publication_lease_expired(batch):
+    """The existing retry expiry rule, also used by publication retention."""
+    return bool(batch.status == "PENDING" and batch.lease_expires_at
+                and batch.lease_expires_at <= timezone.now())
+
+
 class LifecycleError(Exception):
     def __init__(self, code, message, status=409):
         self.code, self.message, self.status = code, message, status
@@ -349,8 +355,7 @@ def retry_batch(batch_id, user, selected_ids=None):
             stale = batch.status == "PROCESSING"
             if stale and (not batch.lease_expires_at or batch.lease_expires_at > timezone.now()):
                 raise LifecycleError("LEASE_ACTIVE", "Processing lease has not expired.")
-            publication_expired = (batch.status == "PENDING" and batch.lease_expires_at
-                                   and batch.lease_expires_at <= timezone.now())
+            publication_expired = publication_lease_expired(batch)
             if batch.status == "PENDING" and batch.dispatch_state not in {"FAILED", "UNKNOWN"} and not publication_expired:
                 raise LifecycleError("DISPATCH_ACTIVE", "Dispatch is already active.")
             if (not batch.expires_at or batch.expires_at <= timezone.now() or batch.source_deleted_at):

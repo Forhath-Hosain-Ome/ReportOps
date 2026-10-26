@@ -6,6 +6,7 @@ from celery import shared_task
 from django.db import transaction
 from django.utils import timezone
 from image_processor.coordination import batch_lock
+from image_processor.lifecycle import publication_lease_expired
 from image_processor.models import FolderBatch
 from image_processor.retention_paths import source_directory, output_directory_for_batch
 
@@ -25,7 +26,9 @@ def cleanup_temp_dirs_task():
             with transaction.atomic():
                 batch = FolderBatch.objects.select_for_update().get(pk=batch_id)
                 eligible = (batch.status in {"COMPLETED", "PARTIAL", "FAILED"}
-                            or (batch.status == "PENDING" and batch.dispatch_state in {"FAILED", "UNKNOWN"}))
+                            or (batch.status == "PENDING" and batch.dispatch_state in {"FAILED", "UNKNOWN"})
+                            or (batch.dispatch_state in {"REQUESTED", "PUBLISHING"}
+                                and publication_lease_expired(batch)))
                 if (not eligible
                         or batch.active_run_token or batch.maintenance_token
                         or not batch.expires_at or batch.expires_at > timezone.now()):

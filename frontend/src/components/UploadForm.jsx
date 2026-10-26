@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useOutputStore } from "../store/outputStore";
 import { useWsProgress } from "../hooks/useWsProgress";
+import { isAbandonedImagePublication } from "../utils/imagePublication";
 import {
   uploadBatch as uploadBatchPuma,
   fetchBatch as fetchBatchPuma,
@@ -242,7 +243,7 @@ export default function UploadForm({ initData = {}, source = "puma" }) {
         if (cancelled) return;
         setProgress({ processed: full.processed_folders, total: full.total_folders,
           percent: full.progress_percent, stage: full.dispatch_state });
-        if (["COMPLETED", "PARTIAL", "FAILED"].includes(full.status) || ["FAILED", "UNKNOWN"].includes(full.dispatch_state)) {
+        if (isAbandonedImagePublication(full) || ["COMPLETED", "PARTIAL", "FAILED"].includes(full.status) || ["FAILED", "UNKNOWN"].includes(full.dispatch_state)) {
           setOutput("batch", full, `Batch #${batchId}`, { source });
           setBatch(null);
         }

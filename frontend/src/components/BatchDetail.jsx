@@ -7,6 +7,7 @@ import {
 } from "../services/pumaApi";
 
 import { saveBlob } from "../utils/fileUtils";
+import { isAbandonedImagePublication } from "../utils/imagePublication";
 import { Btn, Section, Stat, StatGrid } from "../primitives/index";
 import UploadForm from "./UploadForm";
 import BatchList from "./BatchList";
@@ -27,7 +28,7 @@ export default function BatchDetail({ data, source = "puma" }) {
   const failedCount   = data?.failed_folders_count ?? data?.failed_pdfs_count ?? failedRecords.length;
   const retryReports = isImage ? (data?.reports || []).filter((r) => ["FAILED", "PARTIAL"].includes(r.status)) : failedRecords;
   const hasRetryable = isImage ? retryReports.length > 0 : failedRecords.some((f) => !f.retried);
-  const recoverDispatch = isImage && (["FAILED", "UNKNOWN"].includes(data?.dispatch_state) || (data?.status === "PROCESSING" && data?.lease_expires_at && new Date(data.lease_expires_at) <= new Date()));
+  const recoverDispatch = isImage && (isAbandonedImagePublication(data) || ["FAILED", "UNKNOWN"].includes(data?.dispatch_state) || (data?.status === "PROCESSING" && data?.lease_expires_at && new Date(data.lease_expires_at) <= new Date()));
   const canRetry      = (data?.status === "PARTIAL" || data?.status === "FAILED") && hasRetryable;
 
   const total     = data?.total_folders ?? data?.total_pdfs ?? 0;
