@@ -204,6 +204,26 @@ class LifecycleTests(ReliabilityFixture):
         self.assertEqual(failed.attempts.count(), 2)
         self.assertEqual(failed.status, "COMPLETED")
 
+    def test_selective_partial_retry_preserves_completed_report_and_old_outcomes(self):
+        batch = self.make_batch({"A/good.png": True, "A/bad.png": False, "B/good.png": True})
+        self.run_worker(batch)
+        partial = batch.reports.get(folder_name="A")
+        completed = batch.reports.get(folder_name="B")
+        previous = partial.current_attempt
+        preserved = completed.current_attempt_id
+        self.assertEqual(partial.status, "PARTIAL")
+        Image.new("RGB", (8, 8)).save(Path(batch.source_folder) / "A/bad.png")
+        retried = self.retry(batch, [partial.pk])
+        self.run_worker(retried)
+        partial.refresh_from_db()
+        completed.refresh_from_db()
+        previous.refresh_from_db()
+        self.assertEqual(partial.status, "COMPLETED")
+        self.assertEqual(partial.attempts.count(), 2)
+        self.assertEqual(previous.status, "PARTIAL")
+        self.assertEqual(previous.outcomes.filter(status="FAILED").count(), 1)
+        self.assertEqual(completed.current_attempt_id, preserved)
+
     def test_preserved_artifact_disappearance_clears_authority_only(self):
         batch = self.make_batch({"A/one.png": True, "B/bad.png": False})
         self.run_worker(batch)

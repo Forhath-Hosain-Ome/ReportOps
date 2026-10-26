@@ -141,9 +141,10 @@ Verification on 2026-10-26:
 
 | Check | Result |
 | --- | --- |
-| Windows + PostgreSQL 18 + Redis 7 affected backend suite | 111 tests passed, 1 platform skip |
-| Windows + SQLite affected backend suite | 111 tests passed, 3 platform/PostgreSQL skips |
-| Linux + SQLite affected backend suite | 111 tests passed, 5 platform/PostgreSQL skips |
+| Windows + PostgreSQL 18 + Redis 7 affected backend suite | 111 total: 110 passed, 1 platform skip |
+| Windows + SQLite affected backend suite | 112 total: 109 passed, 3 platform/PostgreSQL skips |
+| Linux + SQLite affected backend suite | 111 total: 106 passed, 5 platform/PostgreSQL skips |
+| Additional partial-report retry regression | Passed on SQLite after those cross-platform runs; included in the final 112-test SQLite suite |
 | Redis/PostgreSQL focused integration suite | 6 passed, including real queued task consumption |
 | Image migration drift | No changes detected |
 | Isolated Django system checks | No issues |
