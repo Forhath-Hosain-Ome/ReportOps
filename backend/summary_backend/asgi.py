@@ -22,6 +22,7 @@ from channels.routing import ProtocolTypeRouter, URLRouter
 from channels.security.websocket import AllowedHostsOriginValidator
 from puma_summary.middleware import JWTAuthMiddleware
 from puma_summary.routing import websocket_urlpatterns as puma_ws
+from image_processor.routing import websocket_urlpatterns as image_ws
 from final_summary.routing import websocket_urlpatterns as audit_ws
 from top_five.routing import websocket_urlpatterns as top5_ws
 from mail_download.routing import mail_fetch_search_ws as mail_ws
@@ -31,7 +32,7 @@ application = ProtocolTypeRouter(
     {
         "http": django_asgi_app,
         "websocket": JWTAuthMiddleware(
-            URLRouter(puma_ws + audit_ws + top5_ws + mail_ws)
+            URLRouter(puma_ws + image_ws + audit_ws + top5_ws + mail_ws)
         ),
     }
 )

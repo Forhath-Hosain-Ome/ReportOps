@@ -1,115 +1,69 @@
-# backend/image_processor/tasks/cleanup_task.py
-"""
-Periodic Celery task that removes stale temporary directories.
-
-Runs every 24 hours via Celery Beat.  Cleans up:
-  1. /tmp/batch_uploads/<uuid>/   — upload staging dirs created by FolderUploadView
-  2. <OUTPUT_DIR>/<batch_id>/     — DOCX output dirs created by the processing task
-
-Both are deleted if they are older than MAX_AGE_HOURS (default 24 h).
-"""
-
-from __future__ import annotations
-
+"""Database-owned retention coordinated with execution and retry."""
 import logging
-import os
 import shutil
-import time
-from pathlib import Path
-
+import uuid
 from celery import shared_task
-from django.conf import settings
+from django.db import transaction
+from django.utils import timezone
+from image_processor.coordination import batch_lock
+from image_processor.models import FolderBatch
+from image_processor.retention_paths import source_directory, output_directory_for_batch
 
 logger = logging.getLogger(__name__)
 
-# ── Tuneable constants ────────────────────────────────────────────────────────
-MAX_AGE_HOURS   = 24
-MAX_AGE_SECONDS = MAX_AGE_HOURS * 3600
 
-
-def _dir_age_seconds(path: Path) -> float:
-    """Return how many seconds ago the directory was last modified."""
-    try:
-        return time.time() - path.stat().st_mtime
-    except OSError:
-        return 0.0
-
-
-def _remove_dir(path: Path) -> None:
-    """Delete a directory tree, logging the outcome."""
-    try:
-        shutil.rmtree(path)
-        logger.info("Cleanup: removed %s", path)
-    except Exception as exc:
-        logger.warning("Cleanup: failed to remove %s — %s", path, exc)
-
-
-def _clean_directory(parent: Path, label: str) -> dict:
-    """
-    Iterate immediate children of `parent`.
-    Delete any subdirectory older than MAX_AGE_SECONDS.
-    Returns a summary dict.
-    """
-    removed = 0
-    skipped = 0
-    errors  = 0
-
-    if not parent.exists():
-        logger.debug("Cleanup: %s dir does not exist — skipping (%s)", label, parent)
-        return {"removed": 0, "skipped": 0, "errors": 0}
-
-    for child in parent.iterdir():
-        if not child.is_dir():
-            continue
-        age = _dir_age_seconds(child)
-        if age >= MAX_AGE_SECONDS:
+@shared_task(name="image_processor.cleanup_temp_dirs", queue="image_processor", max_retries=0, ignore_result=True)
+def cleanup_temp_dirs_task():
+    counts = {"removed": 0, "absent": 0, "skipped": 0, "errors": 0}
+    ids = FolderBatch.objects.filter(expires_at__lte=timezone.now()).values_list("pk", flat=True)
+    for batch_id in ids.iterator():
+        with batch_lock(batch_id) as acquired:
+            if not acquired:
+                counts["skipped"] += 1
+                continue
+            token = uuid.uuid4()
+            with transaction.atomic():
+                batch = FolderBatch.objects.select_for_update().get(pk=batch_id)
+                eligible = (batch.status in {"COMPLETED", "PARTIAL", "FAILED"}
+                            or (batch.status == "PENDING" and batch.dispatch_state in {"FAILED", "UNKNOWN"}))
+                if (not eligible
+                        or batch.active_run_token or batch.maintenance_token
+                        or not batch.expires_at or batch.expires_at > timezone.now()):
+                    counts["skipped"] += 1
+                    continue
+                batch.maintenance_token = token
+                batch.save(update_fields=["maintenance_token"])
             try:
-                _remove_dir(child)
-                removed += 1
-            except Exception:
-                errors += 1
-        else:
-            skipped += 1
-
-    logger.info(
-        "Cleanup [%s]: removed=%d  skipped=%d  errors=%d",
-        label, removed, skipped, errors,
-    )
-    return {"removed": removed, "skipped": skipped, "errors": errors}
-
-
-# ── Celery task ───────────────────────────────────────────────────────────────
-
-@shared_task(
-    name="image_processor.cleanup_temp_dirs",
-    max_retries=0,           # never retry a cleanup task
-    ignore_result=True,
-)
-def cleanup_temp_dirs_task() -> None:
-    """
-    Delete upload staging dirs and DOCX output dirs older than 24 hours.
-
-    Scheduled automatically via CELERYBEAT_SCHEDULE in settings.
-    """
-    logger.info("cleanup_temp_dirs_task: starting")
-
-    # 1. Upload staging dirs  →  /tmp/batch_uploads/<uuid>/
-    upload_parent = Path("/tmp") / "batch_uploads"
-    upload_result = _clean_directory(upload_parent, "upload_staging")
-
-    # 2. DOCX output dirs  →  OUTPUT_DIR/<batch_id>/
-    image_settings = getattr(settings, "IMAGE_PROCESSOR_SETTINGS", {})
-    output_dir = Path(
-        image_settings.get(
-            "OUTPUT_DIR",
-            settings.BASE_DIR / "media" / "output" / "defect_image",
-        )
-    )
-    output_result = _clean_directory(output_dir, "docx_output")
-
-    logger.info(
-        "cleanup_temp_dirs_task: done — "
-        "upload[removed=%d] output[removed=%d]",
-        upload_result["removed"],
-        output_result["removed"],
-    )
+                for resolver, marker in ((source_directory, "source_deleted_at"),
+                                         (output_directory_for_batch, "output_deleted_at")):
+                    if getattr(batch, marker):
+                        continue
+                    try:
+                        target = resolver(batch)
+                        exists = target.exists()
+                        if exists:
+                            checked = resolver(batch)
+                            if checked != target or not checked.is_dir():
+                                raise ValueError("Invalid batch directory.")
+                            shutil.rmtree(checked)
+                        with transaction.atomic():
+                            locked = FolderBatch.objects.select_for_update().get(pk=batch_id, maintenance_token=token)
+                            setattr(locked, marker, timezone.now())
+                            locked.save(update_fields=[marker])
+                            if marker == "output_deleted_at":
+                                locked.reports.filter(status__in=["COMPLETED", "PARTIAL"]).update(
+                                    status="FAILED", current_attempt=None, pdf_output_path="",
+                                    error_message="Artifact retention expired.",
+                                )
+                                locked.processed_folders = locked.partial_reports = 0
+                                locked.failed_folders = locked.reports.filter(status="FAILED").count()
+                                locked.status = "FAILED"
+                                locked.last_error_code = "RETENTION_EXPIRED"
+                                locked.save()
+                        counts["removed" if exists else "absent"] += 1
+                    except Exception:
+                        counts["errors"] += 1
+                        logger.exception("Image retention deletion failed for batch %s", batch_id)
+            finally:
+                FolderBatch.objects.filter(pk=batch_id, maintenance_token=token).update(maintenance_token=None)
+    return counts

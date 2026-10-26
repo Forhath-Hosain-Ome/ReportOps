@@ -55,7 +55,7 @@ class ArchiveUploadTests(TestCase):
                 self.assertEqual(batch.total_folders, len({p.split('/')[0] for p in paths}))
                 for path in paths:
                     self.assertEqual((root / path).read_bytes(), path.encode())
-                self.delay.assert_called_once_with(batch.pk, str(root), '', is_renamed_file=False)
+                self.delay.assert_called_once_with(batch.pk, str(root), '', is_renamed_file=False, dispatch_generation=batch.dispatch_generation, dispatch_token=str(batch.dispatch_token))
                 self.delay.reset_mock()
 
     def test_flat_archive_uses_default_or_style_and_normalizes_names(self):
@@ -89,8 +89,7 @@ class ArchiveUploadTests(TestCase):
 
     def test_no_images_unsupported_empty_image_and_mixed_root_entries(self):
         for entries in ([('A/', b'')], [('A/readme.txt', b'text')], [('A/a.jpg', b'')],
-                        [('A/a.jpg', b'image'), ('A/readme.txt', b'text')],
-                        [('a.jpg', b'image'), ('A/b.jpg', b'image')]):
+                        [('A/a.jpg', b'image'), ('A/readme.txt', b'text')]):
             self.rejected(self.upload_archive(entries))
 
     def test_path_attack_matrix(self):
@@ -173,9 +172,9 @@ class ArchiveUploadTests(TestCase):
         doc = Document()
         doc.add_table(rows=1, cols=1)
         doc.save(template)
-        with override_settings(MEDIA_ROOT=self.sandbox, IMAGE_PROCESSOR_SETTINGS={'OUTPUT_DIR': self.sandbox / 'output'}):
+        with override_settings(IMAGE_PROCESSOR_STAGING_ROOT=self.staging, MEDIA_ROOT=self.sandbox, IMAGE_PROCESSOR_SETTINGS={'OUTPUT_DIR': self.sandbox / 'output'}):
             with patch('image_processor.tasks.process_image._push'):
-                result = process_folder_task.run(batch.pk, batch.source_folder, template_path=str(template))
+                result = process_folder_task.run(batch.pk, batch.source_folder, template_path=str(template), dispatch_generation=batch.dispatch_generation, dispatch_token=str(batch.dispatch_token))
         self.assertEqual(result['processed'], 2)
         self.assertEqual(result['status'], 'COMPLETED')
         for report in batch.reports.all():

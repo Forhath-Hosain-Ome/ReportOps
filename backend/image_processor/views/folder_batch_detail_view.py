@@ -7,6 +7,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from image_processor.models import FolderBatch
 from image_processor.serializers import FolderBatchSerializer
+from image_processor.lifecycle import authoritative_path, invalidate_missing_authority
 
 logger = logging.getLogger(__name__)
 
@@ -17,16 +18,11 @@ logger = logging.getLogger(__name__)
 
 def _pdf_exists(report) -> bool:
     """Check if the PDF output file exists on disk."""
-    if not report.pdf_output_path:
+    try:
+        authoritative_path(report)
+        return True
+    except (ValueError, OSError):
         return False
-    # Normalize path to prevent path traversal
-    full = os.path.normpath(settings.MEDIA_ROOT / report.pdf_output_path)
-    media_root = os.path.normpath(str(settings.MEDIA_ROOT))
-    # Ensure the path is within MEDIA_ROOT
-    if not full.startswith(media_root):
-        logger.warning("Path traversal attempt detected: %s", report.pdf_output_path)
-        return False
-    return os.path.exists(full)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -47,6 +43,9 @@ class FolderBatchDetailView(generics.RetrieveAPIView):
         )
 
     def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        for report in instance.reports.all():
+            invalidate_missing_authority(report)
         instance = self.get_object()
         serializer = self.get_serializer(instance)
         data = serializer.data

@@ -115,8 +115,6 @@ def _plan(archive, style):
     # against files, duplicates and case aliases without creating empty folders.
     validate_upload_destinations([p for _, p in files] + [p + '/.zip_directory' for p in directories])
     flat = [('/' not in p) for _, p in files]
-    if any(flat) and not all(flat):
-        raise ArchiveValidationError()
     if all(flat):
         files = [(entry, f"{style or 'uploaded'}/{path}") for entry, path in files]
         for _, path in files:
@@ -144,6 +142,8 @@ def stage_archive(upload, root, style=''):
                         target.write(chunk)
                 if expanded != entry.file_size:
                     raise ArchiveValidationError()
+            return [{"relative_path": path, "original_filename": PurePosixPath(entry.filename).name}
+                    for entry, path in plan]
     except ArchiveValidationError:
         raise
     except (ValidationError, zipfile.BadZipFile, zipfile.LargeZipFile, NotImplementedError,

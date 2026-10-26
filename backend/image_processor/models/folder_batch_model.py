@@ -7,7 +7,7 @@ class FolderBatch(BaseModel):
     """
     One per upload session.
     Tracks the Celery job and aggregated counters.
-    Each folder in the batch will produce one PDF output.
+    Each report identity corresponds to one folder directly containing images.
     """
 
     class Status(models.TextChoices):
@@ -29,7 +29,7 @@ class FolderBatch(BaseModel):
     celery_task_id = models.CharField(max_length=255, blank=True, db_index=True)
     status         = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
 
-    # Where the folders were on disk (used by retry task; not stored persistently for new uploads)
+    # Exact retained staging directory, paired with staging_id for identity checks.
     source_folder  = models.CharField(max_length=512, blank=True)
 
     # Counters — filled in progressively by the Celery task
@@ -42,6 +42,28 @@ class FolderBatch(BaseModel):
 
     # How many times this batch (or its failed folders) have been retried
     retry_count    = models.PositiveIntegerField(default=0)
+
+    staging_id = models.UUIDField(null=True, blank=True, editable=False)
+    dispatch_generation = models.PositiveIntegerField(default=0)
+    dispatch_token = models.UUIDField(null=True, blank=True)
+    dispatch_state = models.CharField(max_length=20, default="REQUESTED")
+    active_run_token = models.UUIDField(null=True, blank=True)
+    maintenance_token = models.UUIDField(null=True, blank=True)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+    processing_started_at = models.DateTimeField(null=True, blank=True)
+    processing_finished_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    source_deleted_at = models.DateTimeField(null=True, blank=True)
+    output_deleted_at = models.DateTimeField(null=True, blank=True)
+    last_error_code = models.CharField(max_length=64, blank=True)
+    job_options = models.JSONField(default=dict)
+    settings_snapshot = models.JSONField(default=dict)
+    intended_reports = models.JSONField(default=list)
+    manifest_reports = models.JSONField(default=list)
+    partial_reports = models.PositiveIntegerField(default=0)
+    submitted_images = models.PositiveIntegerField(default=0)
+    successful_images = models.PositiveIntegerField(default=0)
+    failed_images = models.PositiveIntegerField(default=0)
 
     class Meta:
         ordering = ["-created_at"]
@@ -61,8 +83,8 @@ class FolderBatch(BaseModel):
     @property
     def progress_percent(self):
         """Percentage complete — consumed by the WebSocket consumer."""
-        if self.status in (self.Status.COMPLETED, self.Status.PARTIAL):
+        if self.status in (self.Status.COMPLETED, self.Status.PARTIAL, self.Status.FAILED):
             return 100
         if not self.total_folders:
             return 0
-        return int(self.processed_folders / self.total_folders * 100)
+        return min(100, int((self.processed_folders + self.partial_reports + self.failed_folders) / self.total_folders * 100))
