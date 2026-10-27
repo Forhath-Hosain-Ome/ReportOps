@@ -12,11 +12,10 @@ INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "rest_framework",
     "image_processor",
+    "puma_summary",  # Verify that identical numeric batch IDs remain isolated.
     "final_summary",  # Imported by the existing shared filename utilities.
 ]
 DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}}
-# The app has no committed schema migrations yet (separate Phase 05).
-MIGRATION_MODULES = {"image_processor": None}
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 ROOT_URLCONF = "image_processor.tests.urls"
 MEDIA_ROOT = BASE_DIR / "unused-test-media"
@@ -29,3 +28,6 @@ REST_FRAMEWORK = {
 }
 PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
 CELERY_BROKER_URL = "memory://"
+MIGRATION_MODULES = {"puma_summary": "image_processor.tests.puma_migrations"}
+IMAGE_PROCESSOR_TEST_LOCKS = True
+CHANNEL_LAYERS = {"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}}

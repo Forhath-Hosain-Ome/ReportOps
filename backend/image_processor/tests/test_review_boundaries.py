@@ -57,7 +57,7 @@ class ReviewBoundaryTests(TestCase):
 
     def test_preparation_collisions_rejected_in_both_modes_before_writes(self):
         for names in (['photo.jpg', 'photo.png'], ['A.JPG', 'a.png'], ['a b.jpg', 'a_b.png']):
-            paths = [f'Style-A/{group}/{name}' for group, name in zip(('Front', 'Back'), names)]
+            paths = [f'Style-A/{group}/{name}' for group, name in zip(('Front', 'Front'), names)]
             for renamed in ('false', 'true'):
                 for mode in ('folder', 'archive'):
                     with self.subTest(names=names, renamed=renamed, mode=mode):

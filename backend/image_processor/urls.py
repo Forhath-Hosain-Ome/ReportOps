@@ -1,4 +1,5 @@
 from django.urls import path
+from image_processor.views.reliability_view import FolderBatchRetryView, ImageSettingsView
 from image_processor.views import (
     FolderUploadView,
     FolderBatchListView,
@@ -25,6 +26,8 @@ app_name = "image"
 
 
 folder_urlpatterns = [
+    path("settings/", ImageSettingsView.as_view(), name="settings"),
+    path("folder/batches/<int:pk>/retry/", FolderBatchRetryView.as_view(), name="folder_batch_retry"),
     path("folder/upload/",              FolderUploadView.as_view(), name="folder_upload"),
     path("folder/batches/",             FolderBatchListView.as_view(), name="folder_batch_list"),
     path("folder/batches/<int:pk>/",    FolderBatchDetailView.as_view(), name="folder_batch_detail"),

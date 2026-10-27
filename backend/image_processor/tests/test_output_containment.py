@@ -129,85 +129,72 @@ class OutputDateApiTests(TestCase):
                     self.assertEqual(self.delay.call_args.args[2], date.strip())
 
 
-class OutputWorkerTests(TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.base = Path(self.tmp.name).resolve()
-        self.root = self.base / "job"
-        self.output = self.base / "output"
-        self.template = self.base / "template.docx"
-        doc = Document()
-        doc.add_table(rows=1, cols=1)
-        doc.save(self.template)
-        self.user = User.objects.create(username="output-owner")
+from image_processor.tests.test_reliability import ReliabilityFixture
+from image_processor.lifecycle import authoritative_path
 
-    def batch(self, names=("A",)):
-        for name in names:
-            folder = self.root / name
-            folder.mkdir(parents=True, exist_ok=True)
-            Image.new("RGB", (8, 8), color="blue").save(folder / "photo.png")
-        return FolderBatch.objects.create(created_by=self.user, source_folder=str(self.root), total_folders=len(names))
 
-    def run_worker(self, batch, **kwargs):
-        with override_settings(MEDIA_ROOT=self.base, IMAGE_PROCESSOR_SETTINGS={"OUTPUT_DIR": self.output}):
-            with patch("image_processor.tasks.process_image._push"):
-                return process_folder_task.run(batch.pk, str(self.root), template_path=str(self.template), **kwargs)
-
+class OutputWorkerTests(ReliabilityFixture):
     def test_baseline_traversal_and_invalid_worker_inputs_fail_without_output(self):
         for date in (*BAD_DATES, None, 123, []):
             with self.subTest(date=date):
-                batch = self.batch()
-                result = self.run_worker(batch, date=date)
+                batch = self.make_batch()
+                batch.job_options = {}
+                batch.save(update_fields=["job_options"])
+                with self.assertRaises(OutputPathError):
+                    self.run_worker(batch, date=date)
                 batch.refresh_from_db()
-                self.assertEqual(result["status"], "FAILED")
-                self.assertEqual(batch.failed_folders, 1)
                 report = batch.reports.get()
+                self.assertEqual(batch.status, "FAILED")
+                self.assertEqual(report.status, "FAILED")
                 self.assertEqual(report.pdf_output_path, "")
-                self.assertEqual(report.error_message, "Invalid report date.")
-                self.assertEqual(FolderFailedPDF.objects.filter(batch=batch).count(), 1)
+                self.assertEqual(report.failed_images, 0)
+                self.assertTrue(Path(batch.source_folder).exists())
                 self.assertFalse(self.output.exists())
-                self.assertFalse(self.root.exists())
 
     def test_real_docx_paths_contents_and_blank_date_compatibility(self):
         for date in ("", "2024-02-29"):
-            with self.subTest(date=date):
-                batch = self.batch(("Style A", "B"))
-                self.assertEqual(self.run_worker(batch, date=date)["status"], "COMPLETED")
-                for report in batch.reports.all():
-                    expected = self.output / str(batch.pk) / report.folder_name / report_filename(report.folder_name, date, LABEL)
-                    self.assertEqual((self.base / report.pdf_output_path).resolve(), expected)
-                    self.assertEqual(len(Document(expected).inline_shapes), 1)
-                    self.assertFalse(Path(report.pdf_output_path).is_absolute())
+            batch = self.make_batch({"Style A/photo.png": True, "B/photo.png": True})
+            batch.job_options = {"date": date}
+            batch.save(update_fields=["job_options"])
+            self.assertEqual(self.run_worker(batch)["status"], "COMPLETED")
+            for report in batch.reports.all():
+                attempt = report.current_attempt
+                expected = self.output / str(batch.pk) / str(report.pk) / str(attempt.pk) / report_filename(report.folder_name, date, LABEL)
+                self.assertEqual(authoritative_path(report), expected)
+                self.assertEqual(len(Document(expected).inline_shapes), 1)
+                self.assertFalse(Path(report.pdf_output_path).is_absolute())
 
     def test_invalid_label_fails_before_output_creation(self):
-        batch = self.batch()
-        self.assertEqual(self.run_worker(batch, label_type="../../escape")["status"], "FAILED")
+        batch = self.make_batch()
+        with self.assertRaises(OutputPathError):
+            self.run_worker(batch, label_type="../../escape")
         self.assertFalse(self.output.exists())
 
     def test_existing_docx_and_prepared_files_survive_failed_writes(self):
         for prepared in (False, True):
-            with self.subTest(prepared=prepared):
-                batch = self.batch()
-                folder = self.output / str(batch.pk) / "A"
-                target = folder / ("_prepared/photo.jpg" if prepared else report_filename("A", "", LABEL))
-                target.parent.mkdir(parents=True)
-                target.write_bytes(b"existing-report")
-                self.assertEqual(self.run_worker(batch)["status"], "FAILED")
-                self.assertEqual(target.read_bytes(), b"existing-report")
-                self.assertEqual(batch.reports.get().pdf_output_path, "")
+            batch = self.make_batch()
+            report = batch.reports.get()
+            attempt = report.attempts.get()
+            folder = self.output / str(batch.pk) / str(report.pk) / str(attempt.pk)
+            target = folder / ("_prepared/one.jpg" if prepared else report_filename("A", "2024-02-29", LABEL))
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"existing-report")
+            with self.assertRaises(OutputPathError):
+                self.run_worker(batch)
+            self.assertEqual(target.read_bytes(), b"existing-report")
+            self.assertEqual(batch.reports.get().pdf_output_path, "")
 
-    def test_linked_folder_fails_but_other_folder_completes(self):
-        batch = self.batch(("A", "B"))
+    def test_linked_folder_cannot_redirect_worker_output(self):
+        batch = self.make_batch()
         outside = self.base / "outside"
         outside.mkdir()
         batch_output = self.output / str(batch.pk)
         batch_output.mkdir(parents=True)
         try:
-            (batch_output / "A").symlink_to(outside, target_is_directory=True)
+            (batch_output / str(batch.reports.get().pk)).symlink_to(outside, target_is_directory=True)
         except OSError as exc:
-            self.skipTest(f"Symlink creation unavailable: {exc}")
-        self.assertEqual(self.run_worker(batch)["status"], "PARTIAL")
+            self.skipTest(f"Symlink unavailable: {exc}")
+        with self.assertRaises(OutputPathError):
+            self.run_worker(batch)
         self.assertEqual(list(outside.iterdir()), [])
-        self.assertEqual(batch.reports.get(folder_name="A").pdf_output_path, "")
-        self.assertTrue((self.base / batch.reports.get(folder_name="B").pdf_output_path).is_file())
+        self.assertEqual(batch.reports.get().pdf_output_path, "")

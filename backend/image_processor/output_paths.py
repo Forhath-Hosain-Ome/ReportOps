@@ -4,6 +4,7 @@ from datetime import date as calendar_date
 from pathlib import Path
 import re
 import os
+import zipfile
 
 from rest_framework.exceptions import ValidationError
 
@@ -14,6 +15,28 @@ from image_processor.upload_paths import (
 
 class OutputPathError(ValueError):
     """A generic error safe to persist in report failure records."""
+
+
+def stored_output_path(relative: str) -> Path:
+    from django.conf import settings
+    if not relative:
+        raise OutputPathError("No report output available.")
+    return output_path(Path(settings.MEDIA_ROOT), relative)
+
+
+def validate_docx(relative: str) -> Path:
+    from docx import Document
+    path = stored_output_path(relative)
+    try:
+        if not path.is_file() or path.stat().st_size == 0 or path.suffix.lower() != ".docx":
+            raise OutputPathError("Report artifact is unavailable.")
+        with zipfile.ZipFile(path) as archive:
+            if archive.testzip() or not {"[Content_Types].xml", "word/document.xml"}.issubset(archive.namelist()):
+                raise OutputPathError("Report artifact is invalid.")
+        Document(path)
+    except Exception as exc:
+        raise OutputPathError("Report artifact is invalid.") from exc
+    return path
 
 
 def validate_report_date(value: str) -> str:

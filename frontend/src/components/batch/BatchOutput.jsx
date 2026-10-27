@@ -9,12 +9,16 @@ import DownloadDropdown from "../DownloadDropdown";
 import ReportCertBtn from "../ReportCertBtn";
 import { STATUS_COLOR } from "../../constants"
 import { useOutputStore } from "../../store/outputStore";
+import ImageLogsView from "../ImageLogsView";
+import ImageSettingsForm from "../ImageSettingsForm";
 
 
 // ── Router component ──────────────────────────────────────────────────────────
 export default function BatchOutput({ output }) {
   const { setOutput, setLoading, addLog } = useOutputStore();
   const onAction = createHandleAction(setOutput, setLoading, addLog, output);
+  if (output.type === "image-settings") return <ImageSettingsForm data={output.data} />;
+  if (output.type === "logs" && output.source === "image") return <ImageLogsView data={output.data} batchId={output.batchId} />;
 
   if (output.type === "batch-list")     return <BatchList data={output.data} onAction={onAction} />;
   if (output.type === "batch")          return <BatchDetail data={output.data} source={output.source} />;

@@ -135,7 +135,7 @@ def validate_preparation_destinations(paths: list[str]) -> None:
     targets = set()
     for path in paths:
         parts = PurePosixPath(path).parts
-        target = (parts[0].casefold() if len(parts) > 1 else "", PurePosixPath(path).stem.casefold())
+        target = (str(PurePosixPath(path).parent).casefold(), PurePosixPath(path).stem.casefold())
         if target in targets:
             raise ValidationError("Upload names conflict during image preparation.")
         targets.add(target)

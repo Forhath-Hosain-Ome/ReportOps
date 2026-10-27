@@ -3,7 +3,7 @@ import { attachInterceptors } from "./apiClient";
 
 const image_api = attachInterceptors(
   axios.create({
-    baseURL: "/image/",
+    baseURL: "/",
   })
 );
 
@@ -14,6 +14,7 @@ const normalizeReport = (report) => ({
 
 const normalizeReportPayload = (payload) => {
   if (payload == null) return payload;
+  if (Array.isArray(payload)) return payload.map(normalizeReport);
   if (Array.isArray(payload.results)) {
     return {
       ...payload,
@@ -29,23 +30,11 @@ const normalizeBatch = (batch) => ({
 });
 
 // ── Shared download helper ────────────────────────────────────────────────────
-const triggerBlobDownload = (blob, filename) => {
-  const url = window.URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  window.URL.revokeObjectURL(url);
-};
-
-// ── Batches ───────────────────────────────────────────────────────────────────
 export const fetchBatches = (params) =>
-  image_api.get("folder/batches/", { params }).then((r) => r.data);
+  image_api.get("image/folder/batches/", { params }).then((r) => r.data);
 
 export const fetchBatch = (pk) =>
-  image_api.get(`folder/batches/${pk}/`).then((r) => normalizeBatch(r.data));
+  image_api.get(`image/folder/batches/${pk}/`).then((r) => normalizeBatch(r.data));
 
 export const uploadBatch = (files, paths = [], date = null, style = "", isRenamedFile = false) => {
   const fd = new FormData();
@@ -54,35 +43,40 @@ export const uploadBatch = (files, paths = [], date = null, style = "", isRename
   if (date) fd.append("date", date);
   if (style) fd.append("style", style);
   if (isRenamedFile) fd.append("is_renamed_file", "true");
-  return image_api.post("folder/upload/", fd).then((r) => r.data);
+  return image_api.post("image/folder/upload/", fd).then((r) => r.data);
 };
 
-export const fetchBatchLogs = (pk) =>
-  image_api.get(`folder/batches/${pk}/logs/`).then((r) => r.data);
+export const fetchBatchLogs = (pk, params) =>
+  image_api.get(`image/folder/batches/${pk}/logs/`, { params }).then((r) => r.data);
 
 // ── Reports ───────────────────────────────────────────────────────────────────
 export const fetchReports = (params) =>
-  image_api.get("folder/reports/", { params }).then((r) => normalizeReportPayload(r.data));
+  image_api.get("image/folder/reports/", { params }).then((r) => normalizeReportPayload(r.data));
 
 export const fetchReport = (pk) =>
-  image_api.get(`folder/reports/${pk}/`).then((r) => normalizeReport(r.data));
+  image_api.get(`image/folder/reports/${pk}/`).then((r) => normalizeReport(r.data));
 
-export const downloadReportPDF = (pk, filename) =>
-  image_api
-    .get(`folder/reports/${pk}/pdf/`, { responseType: "blob" })
-    .then((r) => {
-      const disposition = r.headers["content-disposition"] || "";
-      const match = disposition.match(/filename="?([^"]+)"?/);
-      const name = filename || match?.[1] || `Report_${pk}.pdf`;
-      triggerBlobDownload(r.data, name);
-    });
+const responseFilename = (disposition, fallback) => {
+  const encoded = disposition.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
+  if (encoded) {
+    try { return decodeURIComponent(encoded[1].trim()); } catch { /* Use the plain filename below. */ }
+  }
+  return disposition.match(/filename\s*=\s*"([^"]+)"/i)?.[1]
+    || disposition.match(/filename\s*=\s*([^;]+)/i)?.[1]?.trim()
+    || fallback;
+};
 
-export const downloadReportDOCX = (pk, filename) =>
-  image_api
-    .get(`folder/reports/${pk}/docx/`, { responseType: "blob" })
-    .then((r) => {
-      const disposition = r.headers["content-disposition"] || "";
-      const match = disposition.match(/filename="?([^"]+)"?/);
-      const name = filename || match?.[1] || `Defect_Pictures_Style_${pk}.zip`;
-      triggerBlobDownload(r.data, name);
-    });
+const download = (pk, extension) => image_api
+  .get(`image/folder/reports/${pk}/${extension}/`, { responseType: "blob" })
+  .then((r) => ({
+    blob: r.data,
+    filename: responseFilename(r.headers["content-disposition"] || "", `report-${pk}.${extension}`),
+    contentType: r.headers["content-type"],
+  }));
+
+export const downloadReportPDF = (pk) => download(pk, "pdf");
+export const downloadReportDOCX = (pk) => download(pk, "docx");
+export const retryBatch = (pk, reportIds) => image_api.post(`image/folder/batches/${pk}/retry/`,
+  reportIds ? { report_ids: reportIds } : {}).then((r) => r.data);
+export const fetchSettings = () => image_api.get("image/settings/").then((r) => r.data);
+export const updateSettings = (data) => image_api.patch("image/settings/", data).then((r) => r.data);

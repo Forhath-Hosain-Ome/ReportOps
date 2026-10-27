@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 from rest_framework.exceptions import ValidationError
 
@@ -27,6 +27,9 @@ class UploadContainmentTests(TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.sandbox = Path(self.temporary.name).resolve()
         self.staging = self.sandbox / "batch_uploads"
+        self.staging_override = override_settings(IMAGE_PROCESSOR_STAGING_ROOT=self.staging)
+        self.staging_override.enable()
+        self.addCleanup(self.staging_override.disable)
         # Redirect the original hard-coded /tmp path, never touch real uploads.
         real_path = Path
         self.path_patch = patch(
@@ -58,7 +61,7 @@ class UploadContainmentTests(TestCase):
         self.assertEqual(root.parent, self.staging)
         self.assertEqual(batch.created_by, self.user)
         self.assertEqual((root / "Style-A/photo.jpg").read_bytes(), b"synthetic image")
-        self.delay.assert_called_once_with(batch.id, str(root), "", is_renamed_file=False)
+        self.delay.assert_called_once_with(batch.id, str(root), "", is_renamed_file=False, dispatch_generation=batch.dispatch_generation, dispatch_token=str(batch.dispatch_token))
 
     def test_parent_style_cannot_write_outside_job(self):
         response = self.upload(style="../escaped")

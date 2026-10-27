@@ -6,13 +6,13 @@ import ApiMenu from "./ApiMenu";
 import OutputPanel from "./OutputPanel";
 import { MENU_BY_SERVICE, SERVICE_BY_PATH } from "../../shared/apiGroup";
 
-export default function DashboardLayout({ onSelect }) {
+export default function DashboardLayout({ onSelect, extraSections = [] }) {
   const location = useLocation();
   const [activeId, setActiveId] = useState(null);
 
   const segment = location.pathname.split("/")[1] || "";
   const serviceKey = SERVICE_BY_PATH[segment];
-  const sections = MENU_BY_SERVICE[serviceKey] ?? [];
+  const sections = [...(MENU_BY_SERVICE[serviceKey] ?? []), ...extraSections];
 
   const handleSelect = async (ep) => {
     setActiveId(ep.id);

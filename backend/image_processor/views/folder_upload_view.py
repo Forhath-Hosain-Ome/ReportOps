@@ -18,12 +18,15 @@ from image_processor.serializers import FolderUploadSerializer
 from image_processor.archive_upload import ArchiveValidationError, stage_archive
 from image_processor.output_paths import OutputPathError, validate_report_date
 from image_processor.models import FolderBatch
+from image_processor.lifecycle import create_intake, publish_dispatch
+from image_processor.retention_paths import staging_root
 from image_processor.tasks import process_folder_task
 from utils import normalize_filename
 from image_processor.upload_paths import (
     open_upload_file,
     validate_upload_destinations,
     validate_preparation_destinations,
+    contained_upload_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -98,56 +101,48 @@ class FolderUploadView(APIView):
         except ValidationError:
             return Response({"code": "upload_destination_conflict", "detail": "Upload names conflict."}, status=400)
 
-        upload_base = Path("/tmp") / "batch_uploads"
+        upload_base = staging_root()
         root_created = False
+        intake_committed = False
 
         try:
             upload_base.mkdir(parents=True, exist_ok=True)
-            root = upload_base.resolve() / str(uuid.uuid4())
+            root = contained_upload_path(upload_base, str(uuid.uuid4()))
             temp_dir = str(root)
             # Never reuse a pre-existing directory or follow a planted root link.
             root.mkdir(mode=0o700)
             root_created = True
+            manifest = []
             if archives:
-                stage_archive(archives[0], root, style)
+                manifest = stage_archive(archives[0], root, style)
             for file_obj, relative_path in zip(validated_files, destinations):
                 with open_upload_file(root, relative_path) as dest:
                     for chunk in file_obj.chunks():
                         dest.write(chunk)
+                manifest.append({"relative_path": relative_path, "original_filename": file_obj.name})
 
             # ── Discover folders ──────────────────────────────────────────
-            folders = [
-                f for f in os.listdir(temp_dir)
-                if os.path.isdir(os.path.join(temp_dir, f))
-            ]
+            folders = sorted({str(PurePosixPath(item["relative_path"]).parent) for item in manifest})
 
             # ── Create FolderBatch ────────────────────────────────────────
-            batch = FolderBatch.objects.create(
-                created_by    = request.user,
-                total_folders = len(folders),
-                status        = FolderBatch.Status.PENDING,
-                source_folder = temp_dir,
-            )
+            batch = create_intake(request.user, root, manifest, {
+                "date": date, "is_renamed_file": is_renamed_file,
+            })
+            intake_committed = True
 
             # ── Fire Celery task after DB commit ──────────────────────────
             def on_commit_callback():
-                result = process_folder_task.delay(
-                    batch.id, temp_dir, date,
-                    is_renamed_file=is_renamed_file,
-                )
-                batch.celery_task_id = result.id
-                batch.save(update_fields=["celery_task_id"])
-                logger.info(
-                    "Folder upload | batch #%s | user: %s | folders: %s | task: %s",
-                    batch.id, request.user.username, folders, result.id,
-                )
+                publish_dispatch(batch.pk, batch.dispatch_generation, batch.dispatch_token, process_folder_task)
 
             transaction.on_commit(on_commit_callback)
+            batch.refresh_from_db()
 
             return Response(
                 {
                     "batch_id":      batch.id,
                     "total_folders": len(folders),
+                    "submitted_images": len(manifest),
+                    "dispatch_state": batch.dispatch_state,
                     "message": (
                         f"Uploaded {len(archives) or len(files)} file(s) into "
                         f"{len(folders)} folder(s). Processing started."
@@ -158,7 +153,7 @@ class FolderUploadView(APIView):
 
         except Exception as exc:
             try:
-                if root_created:
+                if root_created and not intake_committed:
                     shutil.rmtree(temp_dir)
             except OSError:
                 logger.warning("Image upload cleanup failed")

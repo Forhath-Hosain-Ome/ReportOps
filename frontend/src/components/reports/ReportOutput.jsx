@@ -16,6 +16,8 @@ import {
 } from "../../services/finalSummaryApi";
 
 function saveBlob(blob, filename) {
+  filename = blob?.filename || filename;
+  blob = blob?.blob || blob;
   const url = URL.createObjectURL(blob);
   const a   = document.createElement("a");
   a.href = url; a.download = filename; a.click();
@@ -81,7 +83,7 @@ function ReportList({ data, onSelect, action = "view" }) {
   const results = Array.isArray(data?.results) ? data.results : (Array.isArray(data) ? data : []);
 
   // Heuristic to detect if we are listing Audit batches instead of reports
-  const isBatchList = results.length > 0 && (results[0].status !== undefined || results[0].total_files !== undefined);
+  const isBatchList = results.length > 0 && (results[0].total_files !== undefined);
 
   const sorted  = [...results].sort((a, b) => {
     const dateA = a.report_date || a.inspection_date || a.created_at || "";
@@ -113,7 +115,7 @@ function ReportList({ data, onSelect, action = "view" }) {
             {r.style || (isBatchList ? `BATCH #${r.id}` : "N/A")}
           </span>
           <span style={{ fontFamily: "var(--font-body)", fontSize: "12px", color: "var(--color-text)", flex: 1 }}>
-            {r.factory_name || r.factory_code || (isBatchList ? `Status: ${r.status}` : "Unknown")}
+            {r.folder_name ? r.status : (r.factory_name || r.factory_code || (isBatchList ? `Status: ${r.status}` : "Unknown"))}
           </span>
           {(r.report_number || (isBatchList && r.processed_files != null)) && (
             <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--color-accent)", background: "rgba(99,102,241,0.1)", padding: "1px 7px", borderRadius: "3px" }}>
@@ -164,6 +166,7 @@ function ReportDetail({ data, downloadReportPDFFn, downloadCertificateFn }) {
     ["Processed",       data?.processed_files],
     ["Failed",          data?.failed_files],
     ["Format Type",     data?.format_type],
+    ["Submitted images", data?.submitted_images], ["Successful images", data?.successful_images], ["Failed images", data?.failed_images],
   ];
 
   // Heuristic to check if we are viewing a Batch Detail instead of a Report
@@ -191,7 +194,7 @@ function ReportDetail({ data, downloadReportPDFFn, downloadCertificateFn }) {
           </span>
         )}
         <div style={{ flex: 1 }} />
-        {!isBatch && downloadReportPDFFn && downloadCertificateFn && (
+        {!isBatch && (!data.folder_name || data.current_attempt_id) && downloadReportPDFFn && downloadCertificateFn && (
           <button
             onClick={() => downloadBoth(data, downloadReportPDFFn, downloadCertificateFn, addLog)}
             style={{
@@ -201,7 +204,7 @@ function ReportDetail({ data, downloadReportPDFFn, downloadCertificateFn }) {
               display: "flex", alignItems: "center", gap: "6px",
             }}
           >
-            ⬇ PDF + Certificate
+            {data.folder_name ? "⬇ PDF + DOCX" : "⬇ PDF + Certificate"}
           </button>
         )}
       </div>
@@ -229,6 +232,10 @@ function ReportDetail({ data, downloadReportPDFFn, downloadCertificateFn }) {
         ))}
       </div>
 
+      {data?.attempts?.length > 0 && <section><h3>Processing and retry history</h3>{data.attempts.map((attempt) => <article key={attempt.id}>
+        <strong>Generation {attempt.generation}: {attempt.status}</strong><p>{attempt.stage} {attempt.error_code} {attempt.reason}</p>
+        {attempt.outcomes.map((image) => <p key={image.id}>{image.original_filename}: {image.status} {image.failure_reason}</p>)}
+      </article>)}</section>}
       {/* PO Numbers */}
       {data?.po_numbers?.length > 0 && (
         <div>
@@ -288,7 +295,7 @@ export default function ReportOutput({ output }) {
         setLoading(true);
         try {
           const data = await fetchReportFn(id);
-          setOutput("report", data, `Report · ${data.style || data.folder_name || id}`);
+          setOutput("report", data, `Report · ${data.style || data.folder_name || id}`, { source: output.source });
           addLog({ level: "info", message: `Loaded report ${data.style || data.folder_name || id}` });
         } catch (e) {
           addLog({ level: "error", message: `Failed to load report #${id}` });

@@ -41,8 +41,8 @@ export const createHandleAction = (setOutput, setLoading, addLog, output = {}) =
         setLoading(true);
         try {
           const data = await fetchBatchLogs(id);
-          setOutput("logs", data, `Logs · Batch #${id}`);
-          addLog({ level: "info", message: `Logs loaded — ${data.total_failed} failed` });
+          setOutput("logs", data, `Logs · Batch #${id}`, { source: output?.source, batchId: id });
+          addLog({ level: "info", message: `Logs loaded — ${data.count ?? data.total_failed} entries` });
         } catch (e) {
           addLog({ level: "error", message: `Failed to load logs for Batch #${id}` });
           setLoading(false);
