@@ -1,0 +1,18 @@
+FROM python:3.12.8-slim AS dependencies
+WORKDIR /build
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
+COPY backend/requirements.txt .
+RUN pip install --prefix=/install --no-cache-dir -r requirements.txt
+
+FROM python:3.12.8-slim
+RUN apt-get update && apt-get install -y --no-install-recommends libreoffice-writer fonts-dejavu && rm -rf /var/lib/apt/lists/*
+COPY --from=dependencies /install /usr/local
+RUN useradd --uid 1001 --create-home appuser
+WORKDIR /app
+COPY --chown=1001:1001 backend/ /app/
+COPY deploy/entrypoint.sh /usr/local/bin/uqgu-entrypoint
+RUN chmod 755 /usr/local/bin/uqgu-entrypoint && mkdir -p /app/logs /app/media/uploads /app/media/output /tmp/batch_uploads && chown -R 1001:1001 /app /tmp/batch_uploads && chmod 750 /app/media /app/logs /tmp/batch_uploads
+USER 1001:1001
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 DJANGO_SETTINGS_MODULE=summary_backend.settings_deployment
+ENTRYPOINT ["/usr/local/bin/uqgu-entrypoint"]
+CMD ["daphne", "-b", "0.0.0.0", "-p", "8000", "summary_backend.asgi:application"]

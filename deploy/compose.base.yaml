@@ -1,0 +1,88 @@
+x-application: &application
+  image: ${BACKEND_IMAGE:?Build and specify the backend image}
+  env_file: ['${RUNTIME_ENV_FILE:?Set the environment-specific runtime file}']
+  environment:
+    DJANGO_SETTINGS_MODULE: summary_backend.settings_deployment
+    POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    REDIS_PASSWORD_FILE: /run/secrets/redis_password
+    DJANGO_SECRET_KEY_FILE: /run/secrets/django_secret
+    FIELD_ENCRYPTION_KEY_FILE: /run/secrets/field_key
+  secrets: [postgres_password, redis_password, django_secret, field_key]
+  volumes:
+    - media:/app/media
+    - staging:/tmp/batch_uploads
+    - logs:/app/logs
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+  networks: [private]
+  restart: unless-stopped
+  security_opt: [no-new-privileges:true]
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set the environment database}
+      POSTGRES_USER: ${POSTGRES_USER:?Set the environment role}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes: [postgres:/var/lib/postgresql]
+    networks: [private]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  redis:
+    image: redis:7-alpine
+    command: [redis-server, --appendonly, 'yes', --aclfile, /run/secrets/redis_acl]
+    secrets: [redis_password, redis_acl]
+    volumes: [redis:/data]
+    networks: [private]
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH=$$(cat /run/secrets/redis_password) redis-cli ping']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  backend:
+    <<: *application
+    healthcheck:
+      test: [CMD, python, -c, 'import socket; socket.create_connection(("127.0.0.1",8000),3).close()']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  worker:
+    <<: *application
+    command: [celery, -A, summary_backend, worker, -l, warning, -Q, 'puma_summary,celery,image_processor', --concurrency=2]
+  beat:
+    <<: *application
+    command: [celery, -A, summary_backend, beat, -l, warning, --schedule=/app/logs/celerybeat-schedule]
+  edge:
+    image: ${FRONTEND_IMAGE:?Build and specify the frontend image}
+    volumes:
+      - ${NGINX_CONFIG_FILE:?Set the environment edge configuration}:/etc/nginx/conf.d/default.conf:ro
+    secrets: [edge_certificate, edge_key]
+    depends_on:
+      backend: {condition: service_healthy}
+    networks: [private]
+    restart: unless-stopped
+
+volumes:
+  postgres:
+  redis:
+  media:
+  staging:
+  logs:
+networks:
+  private:
+secrets:
+  postgres_password: {file: '${SECRETS_DIR:?}/postgres_password'}
+  redis_password: {file: '${SECRETS_DIR:?}/redis_password'}
+  redis_acl: {file: '${SECRETS_DIR:?}/redis_acl'}
+  django_secret: {file: '${SECRETS_DIR:?}/django_secret'}
+  field_key: {file: '${SECRETS_DIR:?}/field_key'}
+  edge_certificate: {file: '${SECRETS_DIR:?}/edge_certificate.pem'}
+  edge_key: {file: '${SECRETS_DIR:?}/edge_key.pem'}
