@@ -5,6 +5,7 @@ from unittest import skipUnless
 from unittest.mock import patch
 
 from asgiref.sync import async_to_sync
+from celery.exceptions import Retry
 from channels.layers import get_channel_layer
 from channels.routing import URLRouter
 from channels.testing import WebsocketCommunicator
@@ -105,7 +106,9 @@ class IntegrationTests(TransactionTestCase):
             with batch_lock(batch.pk) as acquired:
                 self.assertTrue(acquired)
                 self.assertFalse(pool.submit(other_session).result(timeout=5))
-                self.assertIn("ignored", self.run_worker(batch))
+                with patch("image_processor.tasks.process_image.process_defect_docx_task.retry", side_effect=Retry()):
+                    with self.assertRaises(Retry):
+                        self.run_worker(batch)
             self.assertTrue(pool.submit(other_session).result(timeout=5))
         self.run_worker(batch)
         self.assertEqual(ProcessingAttempt.objects.filter(report__batch=batch).count(), 1)

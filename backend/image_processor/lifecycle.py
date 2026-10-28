@@ -143,6 +143,34 @@ def _publication_result(batch_id, generation, token, state, error, task_id=""):
             ).update(status="QUEUED")
 
 
+def _unclaimed_dispatch(batch_id, generation, token):
+    # Match the claim fence before deciding whether a contended message is stale.
+    try:
+        parsed = uuid.UUID(str(token))
+    except (ValueError, TypeError, AttributeError):
+        return FolderBatch.objects.none()
+    if type(generation) is not int or str(parsed) != str(token):
+        return FolderBatch.objects.none()
+    return FolderBatch.objects.filter(
+        pk=batch_id, dispatch_generation=generation, dispatch_token=parsed,
+        status="PENDING", dispatch_state__in=["PUBLISHING", "QUEUED"],
+        active_run_token__isnull=True,
+    )
+
+
+def dispatch_needs_delivery(batch_id, generation, token):
+    return _unclaimed_dispatch(batch_id, generation, token).exists()
+
+
+def fail_unclaimed_dispatch(batch_id, generation, token, code):
+    # Publication-state CAS, like _publication_result; never an execution write.
+    # A lock holder can claim first (making this a no-op), or observe FAILED and
+    # refuse the claim. Run/maintenance ownership and image evidence stay intact.
+    return bool(_unclaimed_dispatch(batch_id, generation, token).update(
+        dispatch_state="FAILED", last_error_code=code,
+    ))
+
+
 def claim_execution(batch_id, generation, token):
     if not generation or not token:
         return None

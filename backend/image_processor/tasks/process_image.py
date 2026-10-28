@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from celery import shared_task
+from celery.exceptions import Retry
 from django.conf import settings
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -384,8 +385,37 @@ def _translate_names(names: list[str], target_language: str) -> dict[str, str]:
 
 # ── Temp-dir cleanup ─────────────────────────────────────────────────────────
 
+LOCK_CONTENTION_MAX_RETRIES = 2
+LOCK_CONTENTION_BASE_DELAY = 60
+
+
+def _retry_contended_dispatch(task, batch_id, generation, token):
+    from image_processor.lifecycle import dispatch_needs_delivery, fail_unclaimed_dispatch
+
+    if not dispatch_needs_delivery(batch_id, generation, token):
+        return {"ignored": "Dispatch no longer needs delivery"}
+    if task.request.retries >= LOCK_CONTENTION_MAX_RETRIES:
+        if fail_unclaimed_dispatch(batch_id, generation, token, "DISPATCH_LOCK_RETRY_EXHAUSTED"):
+            raise RuntimeError("Image dispatch lock retries exhausted; recovery is required.")
+        return {"ignored": "Dispatch no longer needs delivery"}
+    countdown = LOCK_CONTENTION_BASE_DELAY * (2 ** task.request.retries)
+    try:
+        # Celery publishes the replacement with the same task/dispatch identity
+        # before Retry lets the worker acknowledge this delivery.
+        raise task.retry(exc=RuntimeError("Image batch execution lock is busy."),
+                         countdown=countdown, max_retries=LOCK_CONTENTION_MAX_RETRIES)
+    except Retry:
+        raise
+    except Exception:
+        # A failed retry publication must leave an explicit recovery route, not
+        # PENDING/QUEUED with no runnable broker delivery.
+        fail_unclaimed_dispatch(batch_id, generation, token, "DISPATCH_LOCK_RETRY_PUBLISH_FAILED")
+        raise
+
+
 # Main task identity and public alias remain compatible with existing routing.
-@shared_task(bind=True, max_retries=0, soft_time_limit=1200, time_limit=1500,
+@shared_task(bind=True, max_retries=LOCK_CONTENTION_MAX_RETRIES, acks_late=True,
+             soft_time_limit=1200, time_limit=1500,
              name="image_processor.process_defect_docx")
 def process_defect_docx_task(
     self, batch_id: int, source_folder: str, date: str = "",
@@ -407,7 +437,7 @@ def process_defect_docx_task(
         return {"ignored": "Missing durable dispatch identity"}
     with batch_lock(batch_id) as acquired:
         if not acquired:
-            return {"ignored": "Batch busy"}
+            return _retry_contended_dispatch(self, batch_id, dispatch_generation, dispatch_token)
         batch = claim_execution(batch_id, dispatch_generation, dispatch_token)
         if batch is None:
             return {"ignored": "Dispatch is no longer claimable"}
