@@ -13,6 +13,8 @@ COPY --chown=1001:1001 backend/ /app/
 COPY deploy/entrypoint.sh /usr/local/bin/uqgu-entrypoint
 RUN chmod 755 /usr/local/bin/uqgu-entrypoint && mkdir -p /app/logs /app/media/uploads /app/media/output /tmp/batch_uploads && chown -R 1001:1001 /app /tmp/batch_uploads && chmod 750 /app/media /app/logs /tmp/batch_uploads
 USER 1001:1001
+RUN python manage.py collectstatic --noinput --settings=summary_backend.settings_collectstatic \
+    && test -f /app/staticfiles/admin/css/base.css
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 DJANGO_SETTINGS_MODULE=summary_backend.settings_deployment
 ENTRYPOINT ["/usr/local/bin/uqgu-entrypoint"]
 CMD ["daphne", "-b", "0.0.0.0", "-p", "8000", "summary_backend.asgi:application"]
