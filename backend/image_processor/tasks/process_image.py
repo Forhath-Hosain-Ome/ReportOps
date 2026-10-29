@@ -309,13 +309,10 @@ def _add_image_paragraph(doc: Document, image_path: str) -> None:
     para = doc.add_paragraph()
     para.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = para.add_run()
-    with Image.open(image_path) as image:
-        width_px, height_px = image.size
-    scale = min(IMG_WIDTH_INCHES / width_px, IMG_HEIGHT_INCHES / height_px)
     run.add_picture(
         image_path,
-        width=Inches(width_px * scale),
-        height=Inches(height_px * scale),
+        width=Inches(IMG_WIDTH_INCHES),
+        height=Inches(IMG_HEIGHT_INCHES),
     )
 
 

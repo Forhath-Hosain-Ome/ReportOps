@@ -61,7 +61,7 @@ class ImageQualityTests(SimpleTestCase):
         with Image.open(low_prepared) as image:
             self.assertEqual(image.size, (80, 60))
 
-    def test_docx_embeds_useful_raster_with_aspect_preserving_layout(self):
+    def test_docx_embeds_useful_raster_with_fixed_report_layout(self):
         prepared = self.prepare(self.source())
         docx_path = self.make_docx([prepared])
         with zipfile.ZipFile(docx_path) as archive:
@@ -71,9 +71,8 @@ class ImageQualityTests(SimpleTestCase):
             self.assertGreaterEqual(max(embedded.size), 1200)
 
         shape = Document(docx_path).inline_shapes[0]
-        self.assertAlmostEqual(shape.width.inches, 2.76, places=2)
+        self.assertAlmostEqual(shape.width.inches, 4.51, places=2)
         self.assertAlmostEqual(shape.height.inches, 3.68, places=2)
-        self.assertAlmostEqual(shape.width / shape.height, 0.75, places=3)
 
     @skipUnless(shutil.which("libreoffice"), "LibreOffice is required for raster-preservation verification")
     def test_libreoffice_pdf_keeps_useful_raster_resolution(self):

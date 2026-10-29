@@ -387,7 +387,7 @@ class LifecycleTests(ReliabilityFixture):
         report = second.reports.get()
         document = Document(stored_output_path(report.pdf_output_path))
         shape = document.inline_shapes[0]
-        self.assertAlmostEqual(shape.width.inches, 3.68, places=2)
+        self.assertAlmostEqual(shape.width.inches, 4.51, places=2)
         self.assertAlmostEqual(shape.height.inches, 3.68, places=2)
 
     def test_owner_scoped_raw_docx_and_paginated_logs(self):
