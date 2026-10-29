@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -21,7 +22,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from docx.shared import Inches, Pt, RGBColor
-from PIL import Image
+from PIL import Image, ImageOps
 
 from image_processor.models import FolderBatch, FolderReport, FolderFailedPDF
 from image_processor.output_paths import (
@@ -86,6 +87,8 @@ VALID_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".webp", "
 
 IMG_WIDTH_INCHES  =  4.51
 IMG_HEIGHT_INCHES =  3.68
+MIN_RASTER_BOUND_PX = 1600
+JPEG_QUALITY = 95
 
 IMAGES_PER_PAGE = 2
 
@@ -96,10 +99,13 @@ def _is_valid_image(filename: str) -> bool:
     return Path(filename).suffix.lower() in VALID_EXTENSIONS
 
 
-def _prepare_image(image_path: str, dest_dir: Path, *, output_root: Path, dimensions=(325, 265)) -> Optional[Path]:
-    """
-    Convert and resize an image to JPEG at 325x265 px.
-    dest_dir is relative to output_root. Return the dest Path or None on failure.
+def _prepare_image(image_path: str, dest_dir: Path, *, output_root: Path,
+                   dimensions=(325, 265)) -> Optional[Path]:
+    """Prepare a JPEG without upscaling or reducing it below the quality floor.
+
+    ``dimensions`` remains the job's preferred raster bound. Values below the
+    inspection-quality floor cannot force a thumbnail; larger values remain
+    available for deployments that intentionally retain more source pixels.
     """
     source = Path(image_path)
     relative = str(dest_dir / (source.stem + ".jpg"))
@@ -111,14 +117,38 @@ def _prepare_image(image_path: str, dest_dir: Path, *, output_root: Path, dimens
             raise FileNotFoundError("Accepted source image is unavailable.")
         try:
             with Image.open(source) as original:
+                source_format = (original.format or "").upper()
+                orientation = original.getexif().get(274, 1)
                 original.load()
-                img = original.copy()
+                img = ImageOps.exif_transpose(original)
+                img.load()
         except (Image.UnidentifiedImageError, Image.DecompressionBombError, ValueError):
             return None
         except OSError as exc:
             if exc.errno is not None:
                 raise  # Permission, missing source and I/O failures are infrastructure failures.
             return None  # Pillow's truncated/unsupported decoder errors have no OS errno.
+
+        requested_width, requested_height = dimensions
+        max_dimensions = (
+            max(requested_width, MIN_RASTER_BOUND_PX),
+            max(requested_height, MIN_RASTER_BOUND_PX),
+        )
+        resized = img.width > max_dimensions[0] or img.height > max_dimensions[1]
+        if resized:
+            img.thumbnail(max_dimensions, Image.Resampling.LANCZOS)
+
+        copy_source = (
+            source_format in {"JPEG", "JPG"}
+            and orientation in (None, 1)
+            and not resized
+            and img.mode == "RGB"
+        )
+        if copy_source:
+            with source.open("rb") as source_stream, open_output_file(output_root, relative) as stream:
+                created = True
+                shutil.copyfileobj(source_stream, stream)
+            return dest
 
         if img.mode in ("RGBA", "LA", "P"):
             bg = Image.new("RGB", img.size, (255, 255, 255))
@@ -130,11 +160,9 @@ def _prepare_image(image_path: str, dest_dir: Path, *, output_root: Path, dimens
         elif img.mode != "RGB":
             img = img.convert("RGB")
 
-        img = img.resize(dimensions, Image.Resampling.LANCZOS)
-
         import io as _io
         buf = _io.BytesIO()
-        img.save(buf, "JPEG", quality=95)
+        img.save(buf, "JPEG", quality=JPEG_QUALITY, optimize=True, subsampling=0)
         with open_output_file(output_root, relative) as stream:
             created = True
             stream.write(buf.getvalue())
@@ -281,7 +309,14 @@ def _add_image_paragraph(doc: Document, image_path: str) -> None:
     para = doc.add_paragraph()
     para.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = para.add_run()
-    run.add_picture(image_path, width=Inches(IMG_WIDTH_INCHES))
+    with Image.open(image_path) as image:
+        width_px, height_px = image.size
+    scale = min(IMG_WIDTH_INCHES / width_px, IMG_HEIGHT_INCHES / height_px)
+    run.add_picture(
+        image_path,
+        width=Inches(width_px * scale),
+        height=Inches(height_px * scale),
+    )
 
 
 # ── Per-folder DOCX generation ────────────────────────────────────────────────

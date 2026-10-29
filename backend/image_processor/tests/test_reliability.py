@@ -383,7 +383,12 @@ class LifecycleTests(ReliabilityFixture):
         self.run_worker(second)
         prepared = next(self.output.rglob("*.jpg"))
         with Image.open(prepared) as image:
-            self.assertEqual(image.size, (80, 60))
+            self.assertEqual(image.size, (8, 8))
+        report = second.reports.get()
+        document = Document(stored_output_path(report.pdf_output_path))
+        shape = document.inline_shapes[0]
+        self.assertAlmostEqual(shape.width.inches, 3.68, places=2)
+        self.assertAlmostEqual(shape.height.inches, 3.68, places=2)
 
     def test_owner_scoped_raw_docx_and_paginated_logs(self):
         batch = self.make_batch()

@@ -18,8 +18,9 @@ export default function ImageSettingsForm({ data }) {
   };
   return <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 480 }}>
     <h2>Image Processor settings</h2>
-    {[["retention_hours", "Retention (hours)", 1, 720], ["image_width_px", "Image width (pixels)", 32, 4096], ["image_height_px", "Image height (pixels)", 32, 4096]].map(([key, label, min, max]) =>
+    {[["retention_hours", "Retention (hours)", 1, 720], ["image_width_px", "Preferred raster width (pixels)", 32, 4096], ["image_height_px", "Preferred raster height (pixels)", 32, 4096]].map(([key, label, min, max]) =>
       <label key={key}>{label}<input type="number" required min={min} max={max} value={values[key]} onChange={(e) => setValues({ ...values, [key]: Number(e.target.value) })} /></label>)}
+    <p>Images keep their aspect ratio and are never upscaled. A 1600 px quality floor prevents thumbnail-sized report rasters.</p>
     <button disabled={busy} type="submit">Save settings</button>
     <p role="status">{message}</p>
   </form>;
