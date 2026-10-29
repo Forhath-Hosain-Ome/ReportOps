@@ -8,6 +8,8 @@ from unittest import skipUnless
 
 from django.test import SimpleTestCase
 from docx import Document
+from docx.image.exceptions import UnrecognizedImageError
+from docx.image.image import Image as DocxImage
 from PIL import Image, ImageDraw
 from pypdf import PdfReader
 
@@ -60,6 +62,23 @@ class ImageQualityTests(SimpleTestCase):
         low_prepared = self.prepare(low, dimensions=(4096, 4096))
         with Image.open(low_prepared) as image:
             self.assertEqual(image.size, (80, 60))
+
+    def test_docx_incompatible_jpeg_is_reencoded_without_dimension_loss(self):
+        source = self.source("jfxx.jpeg", (1280, 960))
+        payload = source.read_bytes()
+        self.assertEqual(payload[6:11], b"JFIF\x00")
+        source.write_bytes(payload[:6] + b"JFXX\x00" + payload[11:])
+        with Image.open(source) as image:
+            image.load()
+            self.assertEqual(image.size, (1280, 960))
+        with self.assertRaises(UnrecognizedImageError):
+            DocxImage.from_file(str(source))
+
+        prepared = self.prepare(source)
+        self.assertNotEqual(source.read_bytes(), prepared.read_bytes())
+        embedded = DocxImage.from_file(str(prepared))
+        self.assertEqual((embedded.px_width, embedded.px_height), (1280, 960))
+        self.make_docx([prepared], "jfxx-report.docx")
 
     def test_docx_embeds_useful_raster_with_fixed_report_layout(self):
         prepared = self.prepare(self.source())

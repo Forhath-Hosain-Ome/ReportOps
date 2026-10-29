@@ -19,6 +19,12 @@ from celery.exceptions import Retry
 from django.conf import settings
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.image.exceptions import (
+    InvalidImageStreamError,
+    UnexpectedEndOfFileError,
+    UnrecognizedImageError,
+)
+from docx.image.image import Image as DocxImage
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from docx.shared import Inches, Pt, RGBColor
@@ -99,6 +105,14 @@ def _is_valid_image(filename: str) -> bool:
     return Path(filename).suffix.lower() in VALID_EXTENSIONS
 
 
+def _is_docx_compatible_image(image_path: Path) -> bool:
+    try:
+        DocxImage.from_file(str(image_path))
+    except (InvalidImageStreamError, UnexpectedEndOfFileError, UnrecognizedImageError):
+        return False
+    return True
+
+
 def _prepare_image(image_path: str, dest_dir: Path, *, output_root: Path,
                    dimensions=(325, 265)) -> Optional[Path]:
     """Prepare a JPEG without upscaling or reducing it below the quality floor.
@@ -143,6 +157,7 @@ def _prepare_image(image_path: str, dest_dir: Path, *, output_root: Path,
             and orientation in (None, 1)
             and not resized
             and img.mode == "RGB"
+            and _is_docx_compatible_image(source)
         )
         if copy_source:
             with source.open("rb") as source_stream, open_output_file(output_root, relative) as stream:
