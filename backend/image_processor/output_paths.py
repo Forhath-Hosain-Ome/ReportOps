@@ -17,6 +17,9 @@ class OutputPathError(ValueError):
     """A generic error safe to persist in report failure records."""
 
 
+REPORT_FILENAME_PREFIX = "Defect_GOODS_pictures_report_for_Style"
+
+
 def stored_output_path(relative: str) -> Path:
     from django.conf import settings
     if not relative:
@@ -61,7 +64,10 @@ def report_filename(folder: str, date: str, label: str) -> str:
             if not isinstance(component, str):
                 raise OutputPathError("Invalid report output path.")
             validate_upload_path(component, single_component=True)
-        name = f"{label}_{folder.replace(' ', '_')}_dated on {date or 'no-date'}.docx"
+        name = (
+            f"{REPORT_FILENAME_PREFIX}_{folder.replace(' ', '_')}"
+            f"_dated at {date or 'no-date'}.docx"
+        )
         return validate_upload_path(name, single_component=True)
     except (ValidationError, UnicodeError) as exc:
         raise OutputPathError("Invalid report output path.") from exc

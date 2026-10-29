@@ -14,7 +14,7 @@ from PIL import Image
 from image_processor.models import FolderBatch, FolderFailedPDF
 from image_processor.output_paths import (
     OutputPathError, open_output_file, output_directory, output_path,
-    report_filename, validate_report_date,
+    REPORT_FILENAME_PREFIX, report_filename, validate_report_date,
 )
 from image_processor.tasks import process_folder_task
 from image_processor.tests import test_upload_containment as upload_tests
@@ -39,7 +39,14 @@ class OutputRulesTests(SimpleTestCase):
                 validate_report_date(value)
 
     def test_filename_contract_and_utf8_byte_boundary(self):
-        self.assertEqual(report_filename("Style A", "", LABEL), f"{LABEL}_Style_A_dated on no-date.docx")
+        self.assertEqual(
+            report_filename("Style A", "", LABEL),
+            f"{REPORT_FILENAME_PREFIX}_Style_A_dated at no-date.docx",
+        )
+        self.assertEqual(
+            report_filename("ABC123", "2026-10-29", "Defect Fabric"),
+            f"{REPORT_FILENAME_PREFIX}_ABC123_dated at 2026-10-29.docx",
+        )
         overhead = len(report_filename("A", "2026-09-08", "L").encode()) - 1
         for folder in ("a" * (255 - overhead), "é" * ((255 - overhead) // 2)):
             self.assertLessEqual(len(report_filename(folder, "2026-09-08", "L").encode()), 255)
