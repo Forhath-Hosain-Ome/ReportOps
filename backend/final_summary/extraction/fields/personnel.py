@@ -26,9 +26,10 @@ from typing import Optional
 from final_summary.extraction.core import (
     CellGrid,
     DirectionRule,
-    resolve_value,
-    find_inline_value,
+    resolve_value as _rslv,
+    find_inline_value as _inlineval,
 )
+from final_summary.utils import base_extract
 
 # ---------------------------------------------------------------------------
 # Per-field synonym lists and directions
@@ -95,31 +96,7 @@ DO_SET_COL_SIZE_SYNONYMS: list[str] = [
 ]
 # DOWN — breakdown table appears below the label
 _DO_SET_COL_DIR = DirectionRule.DOWN
-
-
-# ---------------------------------------------------------------------------
-# Internal helper
-# ---------------------------------------------------------------------------
-
-def _extract_field(
-    grid: CellGrid,
-    synonyms: list[str],
-    direction,
-) -> str:
-    """Find a label and return the value in the given direction."""
-    for row, col, cell_text in grid.find_label_positions(synonyms):
-        # Inline check (e.g. "Inspector: John Smith")
-        for syn in synonyms:
-            value = find_inline_value(syn, cell_text)
-            if value:
-                return value
-
-        value = resolve_value(grid, (row, col), direction)
-        if value:
-            return value
-
-    return ""
-
+_labelp = CellGrid.find_label_positions
 
 # ---------------------------------------------------------------------------
 # Unified extract() — returns all personnel fields as a dict
@@ -129,27 +106,13 @@ def extract(
     grid: CellGrid,
     path: Optional[Path] = None,
 ) -> dict[str, str]:
-    """
-    Extract all personnel and outcome fields in one pass.
-
-    Parameters
-    ----------
-    grid : CellGrid for the sheet being processed
-    path : unused
-
-    Returns
-    -------
-    dict with keys:
-      inspector, person, carton, needle_detector,
-      remarks, audit_result, do_set_col_size
-    All values are strings or "" if not found.
-    """
+    
     return {
-        "inspector":       _extract_field(grid, INSPECTOR_SYNONYMS, _INSPECTOR_DIR),
-        "person":          _extract_field(grid, PERSON_SYNONYMS, _PERSON_DIR),
-        "carton":          _extract_field(grid, CARTON_SYNONYMS, _CARTON_DIR),
-        "needle_detector": _extract_field(grid, NEEDLE_DETECTOR_SYNONYMS, _NEEDLE_DIR),
-        "remarks":         _extract_field(grid, REMARKS_SYNONYMS, _REMARKS_DIR),
-        "audit_result":    _extract_field(grid, AUDIT_RESULT_SYNONYMS, _AUDIT_RESULT_DIR),
-        "do_set_col_size": _extract_field(grid, DO_SET_COL_SIZE_SYNONYMS, _DO_SET_COL_DIR),
+        "inspector":       base_extract(grid, path, _labelp, _inlineval, _rslv, INSPECTOR_SYNONYMS, _INSPECTOR_DIR),
+        "person":          base_extract(grid, path, _labelp, _inlineval, _rslv, PERSON_SYNONYMS, _PERSON_DIR),
+        "carton":          base_extract(grid, path, _labelp, _inlineval, _rslv, CARTON_SYNONYMS, _CARTON_DIR),
+        "needle_detector": base_extract(grid, path, _labelp, _inlineval, _rslv, NEEDLE_DETECTOR_SYNONYMS, _NEEDLE_DIR),
+        "remarks":         base_extract(grid, path, _labelp, _inlineval, _rslv, REMARKS_SYNONYMS, _REMARKS_DIR),
+        "audit_result":    base_extract(grid, path, _labelp, _inlineval, _rslv, AUDIT_RESULT_SYNONYMS, _AUDIT_RESULT_DIR),
+        "do_set_col_size": base_extract(grid, path, _labelp, _inlineval, _rslv, DO_SET_COL_SIZE_SYNONYMS, _DO_SET_COL_DIR),
     }

@@ -38,6 +38,10 @@ class FolderBatchSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "reports",
+            "dispatch_state", "dispatch_generation", "partial_reports", "submitted_images",
+            "successful_images", "failed_images", "last_error_code", "processing_started_at",
+            "processing_finished_at", "expires_at", "source_deleted_at", "output_deleted_at",
+            "lease_expires_at",
         ]
         read_only_fields = fields
 
@@ -69,6 +73,8 @@ class FolderBatchListSerializer(serializers.ModelSerializer):
             "progress_percent",
             "retry_count",
             "report_count",
+            "dispatch_state", "partial_reports", "failed_folders", "submitted_images",
+            "successful_images", "failed_images", "last_error_code",
             "failed_folder_count",
             "created_by",
             "created_at",

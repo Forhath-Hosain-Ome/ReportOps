@@ -6,7 +6,14 @@
  * That instance should point to  /api/final-summary/
  */
 
-import final_summary_api from "../lib/final_summary_api";
+import axios from "axios";
+import { attachInterceptors } from "./apiClient";
+
+const final_summary_api = attachInterceptors(
+  axios.create({
+    baseURL: "/final-summary/",
+  })
+);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Registration — Buyers

@@ -1,0 +1,4 @@
+name: uqgu-uat
+services:
+  edge:
+    ports: ['0.0.0.0:18080:80']

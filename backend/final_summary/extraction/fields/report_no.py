@@ -41,7 +41,6 @@ SYNONYMS: list[str] = [
     "report no",
     "report number",
     "inspection report no",
-    "report no.",
     "audit report no",
 ]
 
@@ -49,6 +48,7 @@ DIRECTION = DirectionRule.RIGHT
 
 # Standard Report Number pattern
 _REPORT_NO_RE = re.compile(r"^[A-Z]{2}\d{2}-\d{2}[A-Z0-9]+-\d+$")
+_PO_NO_RE     = re.compile(r"^P\d{0,4}[-\s]?\d{6}-\d{3}(?:-\d+)*$")
 
 # Fixed cell fallback per format_type: {format_type: (row_0based, col_0based)}
 # These are checked only when label + pattern search both fail.
@@ -66,6 +66,9 @@ def _is_valid_report_no(value: str) -> bool:
         return False
     return bool(_REPORT_NO_RE.match(value.strip().rstrip(".,;:")))
 
+def _is_po_no(value: str) -> bool:
+    """True if value looks like a PO number — must not be returned as report_no."""
+    return bool(_PO_NO_RE.search(value.strip()))
 
 def _pattern_scan(grid: CellGrid) -> str:
     """Scan every cell for a value matching the standard report number pattern."""
@@ -108,7 +111,7 @@ def extract(
         # Try inline first: "Label: Value" packed into same cell
         for syn in SYNONYMS:
             inline_value = find_inline_value(syn, cell_text)
-            if inline_value:
+            if inline_value and not _is_po_no(inline_value):
                 return inline_value.strip()
         
         # Scan right up to 10 cells
@@ -118,8 +121,13 @@ def extract(
                 continue
             # Clean and return — valid pattern preferred, but raw accepted
             cleaned = value.strip().rstrip(".,;:")
-            if cleaned:
-                return cleaned
+            if not cleaned:
+                continue
+            if _is_po_no(cleaned):
+                # This cell holds a PO number, not a report number — skip
+                continue
+            
+            return cleaned
 
     # ── Stage 2: Pattern scan ─────────────────────────────────────────────
     found = _pattern_scan(grid)

@@ -27,118 +27,45 @@ from typing import Optional
 from final_summary.extraction.core import (
     CellGrid,
     DirectionRule,
-    to_display_date,
-    resolve_po_wh_value,
-    resolve_value,
+    to_display_date as _tdtl,
+    date_table as _dtbl,
 )
-
+from final_summary.utils import shipment_and_time
 # ---------------------------------------------------------------------------
 # Per-field synonym lists
 # ---------------------------------------------------------------------------
 
 EXF_SYNONYMS: list[str] = [
     "exf",
-    "exf:",
-    "ex factory",
-    "ex-factory",
-    "ex factory date",
 ]
 
 PO_EDT_SYNONYMS: list[str] = [
-    "po edt",
-    "p o edt",
-    "po e d t",
-    "po estimated delivery",
-    "po delivery date",
+    "po etd",
     "po. etd",
 ]
 
 PO_WH_SYNONYMS: list[str] = [
-    "po w h",
     "po wh",
     "powh",
     "po w/h",
-    "warehouse",
-    "po warehouse",
-    "po ship date",
     "po. wh",
 ]
 
 PLAN_EDT_SYNONYMS: list[str] = [
     "plan etd",
-    "plan e t d",
     "plan edt",
-    "planned delivery",
-    "plan estimated delivery",
     "plan  etd",
 ]
 
 PLAN_WH_SYNONYMS: list[str] = [
-    "plan w h",
     "plan wh",
     "plan w/h",
-    "plan warehouse",
-    "plan  wh",
 ]
 
 # All dates scan right (value is in the next cell / cells)
 _DIRECTION = DirectionRule.RIGHT
 
-
-# ---------------------------------------------------------------------------
-# Individual extractors — one per date field
-# ---------------------------------------------------------------------------
-
-def extract_exf(grid: CellGrid) -> str:
-    """Extract EX-Factory date, normalised to MM/DD/YYYY."""
-    for row, col, _ in grid.find_label_positions(EXF_SYNONYMS):
-        raw = resolve_po_wh_value(grid, (row, col))
-        if raw:
-            return to_display_date(raw)
-    return ""
-
-
-def extract_po_edt(grid: CellGrid) -> str:
-    """Extract PO EDT date, normalised to MM/DD/YYYY."""
-    for row, col, _ in grid.find_label_positions(PO_EDT_SYNONYMS):
-        raw = resolve_po_wh_value(grid, (row, col))
-        if raw:
-            return to_display_date(raw)
-    return ""
-
-
-def extract_po_wh(grid: CellGrid) -> str:
-    """
-    Extract PO W/H date.
-
-    Uses resolve_po_wh_value which handles both single-cell dates and
-    dates split across 3 cells (MM | DD | YYYY).
-    Normalised to MM/DD/YYYY.
-    """
-    for row, col, _ in grid.find_label_positions(PO_WH_SYNONYMS):
-        raw = resolve_po_wh_value(grid, (row, col))
-        if raw:
-            return to_display_date(raw)
-    return ""
-
-
-def extract_plan_edt(grid: CellGrid) -> str:
-    """Extract Plan EDT date, normalised to MM/DD/YYYY."""
-    for row, col, _ in grid.find_label_positions(PLAN_EDT_SYNONYMS):
-        raw = resolve_po_wh_value(grid, (row, col))
-        if raw:
-            return to_display_date(raw)
-    return ""
-
-
-def extract_plan_wh(grid: CellGrid) -> str:
-    """Extract Plan W/H date, normalised to MM/DD/YYYY."""
-    for row, col, _ in grid.find_label_positions(PLAN_WH_SYNONYMS):
-        raw = resolve_po_wh_value(grid, (row, col))
-        if raw:
-            return to_display_date(raw)
-    return ""
-
+_labelp = CellGrid.find_label_positions
 
 # ---------------------------------------------------------------------------
 # Unified extract() — returns all 5 date fields as a dict
@@ -165,9 +92,9 @@ def extract(
     All values are MM/DD/YYYY strings or "" if not found.
     """
     return {
-        "exf":      extract_exf(grid),
-        "po_edt":   extract_po_edt(grid),
-        "po_wh":    extract_po_wh(grid),
-        "plan_edt": extract_plan_edt(grid),
-        "plan_wh":  extract_plan_wh(grid),
+        "exf":      shipment_and_time(grid, path, _labelp, _dtbl, _tdtl, EXF_SYNONYMS),
+        "po_edt":   shipment_and_time(grid, path, _labelp, _dtbl, _tdtl, PO_EDT_SYNONYMS),
+        "po_wh":    shipment_and_time(grid, path, _labelp, _dtbl, _tdtl, PO_WH_SYNONYMS),
+        "plan_edt": shipment_and_time(grid, path, _labelp, _dtbl, _tdtl, PLAN_EDT_SYNONYMS),
+        "plan_wh":  shipment_and_time(grid, path, _labelp, _dtbl, _tdtl, PLAN_WH_SYNONYMS),
     }

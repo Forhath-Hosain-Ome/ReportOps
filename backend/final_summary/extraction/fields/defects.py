@@ -439,3 +439,4 @@ def extract(
     )
 
     return defect_rows, totals, meta
+

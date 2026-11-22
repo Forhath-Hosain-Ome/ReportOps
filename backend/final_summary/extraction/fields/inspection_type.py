@@ -20,7 +20,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Optional
-
+from utils.normalize_filename import normalize_filename
 from final_summary.extraction.core import (
     CellGrid,
     DirectionRule,
@@ -84,13 +84,17 @@ def extract_from_filename(
     -------
     Resolved inspection type string, or "" if unrecognised.
     """
+    logging.warning("filename=%s", filename)
     if not filename:
         return ""
-
+    name = normalize_filename(filename)
     name = filename.lower().strip()
+    name = re.sub(r"\s+", " ", name.strip())
+    name = name.upper()
+    name = name.replace(" - ", "-").replace(" ", "-")
 
     # ── RE-FINAL ──────────────────────────────────────────────────────────
-    if re.search(AUDIT_TYPE_PATTERNS["RE-FINAL"], name):
+    if re.search(AUDIT_TYPE_PATTERNS["RE-FINAL"], name) or re.search(AUDIT_TYPE_PATTERNS["RE-AUDIT"], name):
         pct       = _safe_pct(audit_qty, ship_qty)
         nth_match = re.search(r"\b(\d+(?:st|nd|rd|th))\s*time\b", name)
         if nth_match:
@@ -104,10 +108,15 @@ def extract_from_filename(
         return f"FINAL {pct}%" if pct else "FINAL"
 
     # ── Other known types ─────────────────────────────────────────────────
-    for audit_type in ("INLINE", "SAMPLE", "CMF"):
+    for audit_type in ("INLINE", "SAMPLE", "CMF", "RANDOM"):
         if re.search(AUDIT_TYPE_PATTERNS[audit_type], name):
             return audit_type
-
+    logging.warning("normalized=%s", name)
+    logging.warning("pattern=%s", AUDIT_TYPE_PATTERNS["FINAL"])
+    logging.warning(
+        "match=%s",
+        bool(re.search(AUDIT_TYPE_PATTERNS["FINAL"], name, re.I))
+    )
     logging.debug(f"inspection_type: no keyword match in '{filename}'")
     return ""
 

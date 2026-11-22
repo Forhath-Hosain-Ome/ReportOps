@@ -1,40 +1,60 @@
 """
 ------------------------
-Fills a pre-built Excel template with audit data.
+Fills per-stage Excel templates with audit data and merges the results
+into one output workbook.
 
-Template selection is driven by BuyerFactoryPair.report_type via
-the template_file property — the caller (export_view) resolves the
-path and passes it in.
+Template selection
+-------------------
+Driven entirely by final_summary/templates_registry.py:
+  (BuyerFactoryPair.report_type, canonical stage) -> template file
+Only stages that actually have matching records get a sheet in the
+output workbook — a factory that only ever ran Inline + Re-Final
+inspections gets a 2-sheet file, not a 4-sheet one with blanks.
+
+Column resolution
+-------------------
+NOTHING is hardcoded by column number. Both prefix fields (factory,
+date_of_issue, ...) and defect columns are located by reading each
+template's own header row (row 2) and matching against known label
+aliases. This is deliberate: a previous hardcoded-column-index version
+of this file silently swapped PO Qty (Set) / (Pack) values and wrote
+audit-end times on top of the Audit Start Time header on one template
+family, because the two template families don't share column layouts.
+Resolving by label makes the writer self-correcting when templates
+change, and turns "wrong column" bugs into a logged "field not found"
+instead of silent data corruption.
 
 Key behaviours
 --------------
-- Defect columns placed by matching item names against template header row 2.
-  Column index from the template is authoritative — no offsets or guessing.
-- Pre-flight validation: if ANY defect item has no matching template column,
-  raises DefectMismatchError BEFORE writing anything.
-- Only cell.value is written — no styling touched.
-- Values normalised to native Python types (date, time, float, int, str)
-  so Excel formulas operate without "click-to-activate".
-- Formula columns (total_hours etc.) are commented out in PREFIX_COLUMNS
-  — they are left for Excel to calculate.
-
-Layout constants (edit here to adjust template positions)
----------------------------------------------------------
-  FINAL_DATA_START_ROW     = 12   (Final / Re-Final sheets)
-  INLINE_DATA_START_ROW    = 5    (INLINE sheet)
-  FINAL_DEFECT_START_COL   = 26   (col Z)
-  INLINE_DEFECT_START_COL  = 21   (col U)
-  DEFECT_HEADER_ROW        = 2
+- Pre-flight validation across ALL stages before writing anything:
+  if any defect item has no matching template column, raises
+  DefectMismatchError before touching any file.
+- Only cell.value is written on the per-stage source template — no
+  styling touched there. Styling *is* carried over when merging into
+  the output workbook (see utils/sheet_copy.py).
+- Values normalised to native Python types (date, time, float, int,
+  str) so Excel formulas operate without "click to activate".
+- A (report_type, stage) with no configured template is skipped with
+  a warning, not a hard failure — unless it's the ONLY stage present,
+  in which case write_summary raises TemplateNotConfiguredError so the
+  caller can surface a clear message instead of returning an empty file.
 """
 
 import logging
 import re
 from datetime import date, datetime, time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import openpyxl
-from openpyxl.utils import get_column_letter
+
+from final_summary.templates_registry import (
+    SHEET_NAME_MAP,
+    STAGE_ORDER,
+    TemplateNotConfiguredError,
+    resolve_template,
+)
+from utils.sheet_copy import copy_sheet
 
 logger = logging.getLogger(__name__)
 
@@ -42,79 +62,57 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # LAYOUT CONSTANTS
 # =============================================================================
+# Data start row and defect-column start col are layout conventions that
+# have held across every template inspected so far. If a future template
+# breaks the convention, add a per-stage override here rather than
+# hardcoding field positions (see FIELD_LABEL_ALIASES below for why).
 
-FINAL_DATA_START_ROW:   int = 12
-INLINE_DATA_START_ROW:  int = 5
-FINAL_DEFECT_START_COL: int = 26   # col Z
-INLINE_DEFECT_START_COL:int = 21   # col U
-DEFECT_HEADER_ROW:      int = 2
+FINAL_DATA_START_ROW:    int = 12   # FINAL / RE_FINAL / RANDOM sheets
+INLINE_DATA_START_ROW:   int = 5    # INLINE sheet
+HEADER_ROW:              int = 2
+
+INLINE_STAGES: set = {"INLINE"}
+
+
+def _data_start_row(stage: str) -> int:
+    return INLINE_DATA_START_ROW if stage in INLINE_STAGES else FINAL_DATA_START_ROW
 
 
 # =============================================================================
-# PREFIX COLUMNS  (Final / Re-Final, cols 1-25)
-# Comment out formula-driven columns — left for Excel to calculate.
+# PREFIX FIELD LABEL ALIASES
 # =============================================================================
+# field key -> acceptable header text(s), matched case/whitespace-insensitively.
+# A field simply won't be written if none of its aliases are found in the
+# template's header row — logged, not silently misplaced.
 
-PREFIX_COLUMNS: List[Tuple[int, str]] = [
-    (1,  "factory"),
-    (2,  "date_of_issue"),
-    (3,  "inspection_type"),
-    (4,  "factory_in"),
-    (5,  "factory_out"),
-    # (6,  "factory_total_hours"),   # formula column
-    (7,  "audit_start"),
-    (8,  "audit_end"),
-    # (9,  "audit_total_hours"),     # formula column
-    (10, "audit_result"),
-    (11, "report_no"),
-    (12, "item_name"),
-    (13, "style_no"),
-    (14, "po_no"),
-    (15, "country"),
-    (16, "po_qty_pcs"),
-    (17, "po_qty_pack"),
-    (18, "po_qty_set"),
-    (19, "po_wh"),
-    (20, "ship_qty"),
-    (21, "audit_qty"),
-    (22, "acceptable_defect_qty"),
-    (23, "defect_qty"),
-    (24, "defect_percentage"),
-    (25, "person"),
-]
-
-# INLINE prefix skeleton (cols 1-20, defects start at col U = 21)
-INLINE_PREFIX_COLUMNS: List[Tuple[int, str]] = [
-    # TODO: confirm exact INLINE column order with template owner
-    (1,  "factory"),
-    (2,  "date_of_issue"),
-    (3,  "inspection_type"),
-    (4,  "factory_in"),
-    (5,  "factory_out"),
-    # (6,  "factory_total_hours"),
-    (7,  "audit_start"),
-    (8,  "audit_end"),
-    # (9,  "audit_total_hours"),
-    (10, "audit_result"),
-    (11, "report_no"),
-    (12, "item_name"),
-    (13, "style_no"),
-    (14, "po_no"),
-    (15, "country"),
-    (16, "ship_qty"),
-    (17, "audit_qty"),
-    (18, "defect_qty"),
-    (19, "defect_percentage"),
-    (20, "person"),
-]
-
-SHEET_NAME_MAP: Dict[str, str] = {
-    "FINAL":    "Final",
-    "RE-FINAL": "Re-Final",
-    "INLINE":   "INLINE",
+FIELD_LABEL_ALIASES: Dict[str, List[str]] = {
+    "factory":               ["Factory"],
+    "date_of_issue":         ["Date of issue", "Date of Issue"],
+    "inspection_type":       ["Inspection Type"],
+    "factory_in":             ["Factory In Time"],
+    "factory_out":            ["Factory Out Time"],
+    "audit_start":            ["Audit Start Time"],
+    "audit_end":              ["Audit End Time"],
+    "audit_result":           ["Audit Result"],
+    "report_no":              ["Report Number", "Report No.", "Report No"],
+    "item_name":              ["Item Name"],
+    "style_no":               ["Style NO.", "Style No.", "Style No"],
+    "po_no":                  ["PO-NO", "PO NO.", "POーNO", "PO No."],
+    "country":                ["Country"],
+    "po_qty_pcs":             ["PO Qty.(Pcs)", "PO Qty (Pcs)."],
+    "po_qty_set":             ["PO Qty.(Set)", "PO Qty (Set)."],
+    "po_qty_pack":            ["PO Qty.(Pack)", "PO Qty (Pack)."],
+    "po_wh":                  ["PO WH", "PO  WH"],
+    "ship_qty":               ["Ship Qty.", "Shipping Qty"],
+    "audit_qty":              ["Audit Qty."],
+    "acceptable_defect_qty":  ["Acceptable Defect Qty"],
+    "defect_qty":             ["Defect Qty.", "DefectQty."],
+    "defect_percentage":      ["Defect %"],
+    "person":                 ["Person"],
 }
 
-INLINE_TYPES: set = {"INLINE"}
+# Formula-driven columns are deliberately absent from the alias map above
+# (factory_total_hours, audit_total_hours) — left for Excel to calculate.
 
 
 # =============================================================================
@@ -140,7 +138,7 @@ _INT_FIELDS:   set = {
 
 
 # =============================================================================
-# CUSTOM EXCEPTION
+# CUSTOM EXCEPTIONS
 # =============================================================================
 
 class DefectMismatchError(Exception):
@@ -149,7 +147,7 @@ class DefectMismatchError(Exception):
 
     Attributes
     ----------
-    mismatches : list of dicts — file_name, report_id, sheet, item, category
+    mismatches : list of dicts — file_name, report_id, stage, sheet, item
     """
     def __init__(self, mismatches: List[Dict[str, Any]]) -> None:
         self.mismatches = mismatches
@@ -235,91 +233,71 @@ def _normalise(key: str, value: Any) -> Any:
     if value in ("", "-"):   return None
     return value
 
+
+def _norm_label(s: str) -> str:
+    """Collapse whitespace and lowercase, for robust header matching."""
+    return re.sub(r"\s+", " ", str(s)).strip().lower()
+
+
 def _strip_prefix(name: str) -> str:
     """'3.Hole, tear' → 'Hole, tear'"""
     return re.sub(r"^\d+\.", "", name).strip()
 
+
 # =============================================================================
-# CANONICAL TYPE
+# CANONICAL STAGE DETECTION
 # =============================================================================
 
-def _canonical_type(itype: str) -> str:
+def _canonical_stage(itype: str) -> str:
     u = (itype or "").upper().strip()
-    if re.search(r"PRE[\s\-]?FINAL", u):                          return "PRE-FINAL"
-    if re.search(r"(?<![A-Z])RE[\s\-]?FINAL|REFINAL", u):        return "RE-FINAL"
+    if re.search(r"PRE[\s\-]?FINAL", u):                           return "PRE_FINAL"
+    if re.search(r"(?<![A-Z])RE[\s\-]?FINAL|REFINAL", u):          return "RE_FINAL"
+    if re.search(r"\bRANDOM\b", u):                                return "RANDOM"
     if re.search(r"\bFINAL\b|SHIPMENT\s*AUDIT|PRE[\s\-]?SHIP", u): return "FINAL"
-    if re.search(r"IN[\s\-]?LINE", u):                            return "INLINE"
-    if re.search(r"\bCMF\b|COUNTER\s*MASTER", u):                 return "CMF"
-    if re.search(r"\bSAMPLE\b|PRE[\s\-]?PROD|\bPP\b", u):        return "SAMPLE"
+    if re.search(r"IN[\s\-]?LINE", u):                             return "INLINE"
+    if re.search(r"\bCMF\b|COUNTER\s*MASTER", u):                  return "CMF"
+    if re.search(r"\bSAMPLE\b|PRE[\s\-]?PROD|\bPP\b", u):         return "SAMPLE"
     return "UNKNOWN"
 
 
-def _is_inline(canonical: str) -> bool:
-    return canonical in INLINE_TYPES
-
-
-def _defect_start_col(canonical: str) -> int:
-    return INLINE_DEFECT_START_COL if _is_inline(canonical) else FINAL_DEFECT_START_COL
-
-
-def _data_start_row(canonical: str) -> int:
-    return INLINE_DATA_START_ROW if _is_inline(canonical) else FINAL_DATA_START_ROW
-
-
-def _prefix_cols(canonical: str) -> List[Tuple[int, str]]:
-    return INLINE_PREFIX_COLUMNS if _is_inline(canonical) else PREFIX_COLUMNS
-
-
 # =============================================================================
-# DEFECT HEADER MAP
+# HEADER MAP  (row 2 of a template -> {normalised_label: col})
 # =============================================================================
 
-def _build_defect_header_map(ws, defect_start_col: int) -> Dict[str, int]:
-    """
-    Read DEFECT_HEADER_ROW from the template.
-    Returns {item_name_stripped: column_index_1based}.
-    Left-to-right scan from defect_start_col; first occurrence wins.
-    """
+def _build_header_map(ws) -> Dict[str, int]:
+    """Read HEADER_ROW across the whole sheet width. First occurrence of
+    a given normalised label wins."""
     header_map: Dict[str, int] = {}
-    for col in range(defect_start_col, ws.max_column + 1):
-        raw = ws.cell(row=DEFECT_HEADER_ROW, column=col).value
+    for col in range(1, ws.max_column + 1):
+        raw = ws.cell(row=HEADER_ROW, column=col).value
         if raw is None:
             continue
         name = str(raw).strip()
         if not name:
             continue
-        if name not in header_map:
-            header_map[name] = col
-        stripped = _strip_prefix(name)
+        norm = _norm_label(name)
+        if norm not in header_map:
+            header_map[norm] = col
+        stripped = _norm_label(_strip_prefix(name))
         if stripped and stripped not in header_map:
             header_map[stripped] = col
-    logger.debug(
-        "defect_header_map: sheet='%s' found %d headers from col %s",
-        ws.title, len(header_map), get_column_letter(defect_start_col),
-    )
     return header_map
 
-def _strip_prefix(name: str) -> str:
-    """'3.Hole, tear' → 'Hole, tear'"""
-    return re.sub(r"^\d+\.", "", name).strip()
 
-def _resolve_defect_col(
-    item_name: str,
-    header_map: Dict[str, int],
-) -> Optional[int]:
-    """Exact match first, case-insensitive fallback. None if not found."""
-    col = header_map.get(item_name)
-    if col is not None:
-        return col
-    stripped = _strip_prefix(item_name)
-    col = header_map.get(stripped)
-    if col is not None:
-        return col
-    lower = item_name.lower()
-    for name, c in header_map.items():
-        if name.lower() == lower:
-            return c
+def _resolve_field_col(field_key: str, header_map: Dict[str, int]) -> Optional[int]:
+    for alias in FIELD_LABEL_ALIASES.get(field_key, []):
+        col = header_map.get(_norm_label(alias))
+        if col is not None:
+            return col
     return None
+
+
+def _resolve_defect_col(item_name: str, header_map: Dict[str, int]) -> Optional[int]:
+    """Exact (normalised) match first, then prefix-stripped."""
+    col = header_map.get(_norm_label(item_name))
+    if col is not None:
+        return col
+    return header_map.get(_norm_label(_strip_prefix(item_name)))
 
 
 # =============================================================================
@@ -327,82 +305,65 @@ def _resolve_defect_col(
 # =============================================================================
 
 def _validate_defects(
-    wb,
-    by_canonical: Dict[str, List[Dict[str, Any]]],
+    stage: str,
+    header_map: Dict[str, int],
+    records: List[Dict[str, Any]],
     defect_items_by_report: Dict[int, List[Dict[str, Any]]],
+    sheet_name: str,
 ) -> List[Dict[str, Any]]:
-    """
-    Check every defect item against the template header map BEFORE writing.
-    Returns list of mismatch dicts (empty = all clear).
-    """
     mismatches: List[Dict[str, Any]] = []
-
-    for canonical, records in by_canonical.items():
-        sheet_name = SHEET_NAME_MAP.get(canonical)
-        if not sheet_name or sheet_name not in wb.sheetnames:
-            continue
-
-        ws           = wb[sheet_name]
-        header_map   = _build_defect_header_map(ws, _defect_start_col(canonical))
-
-        for rec in records:
-            rid       = rec.get("report_id")
-            file_name = rec.get("file_name", "")
-
-            for d in defect_items_by_report.get(rid, []):
-                item_name = (d.get("item") or "").strip()       # "item" key kept in export_view
-                if not item_name:
-                    continue
-                major = _to_int(d.get("major_count", 0))
-                if not major:
-                    continue
-                if _resolve_defect_col(item_name, header_map) is None:
-                    mismatches.append({
-                        "file_name":    file_name,
-                        "report_id":    rid,
-                        "sheet":        sheet_name,
-                        "item":         item_name,
-                        "category_code":  (d.get("category_code") or "").strip(),
-                        "category_label": (d.get("category_label") or "").strip(),
-                    })
-
+    for rec in records:
+        rid       = rec.get("report_id")
+        file_name = rec.get("file_name", "")
+        for d in defect_items_by_report.get(rid, []):
+            item_name = (d.get("item") or "").strip()
+            if not item_name:
+                continue
+            major = _to_int(d.get("major_count", 0))
+            if not major:
+                continue
+            if _resolve_defect_col(item_name, header_map) is None:
+                mismatches.append({
+                    "file_name": file_name,
+                    "report_id": rid,
+                    "stage":     stage,
+                    "sheet":     sheet_name,
+                    "item":      item_name,
+                    "category":  (d.get("category") or "").strip(),
+                })
     return mismatches
 
 
 # =============================================================================
-# SHEET WRITER
+# SHEET WRITER  (fills one stage's template sheet in place)
 # =============================================================================
 
-def _write_sheet(
+def _write_stage_sheet(
     ws,
+    stage: str,
     records: List[Dict[str, Any]],
     defect_items_by_report: Dict[int, List[Dict[str, Any]]],
-    canonical: str,
     header_map: Dict[str, int],
 ) -> int:
-    """
-    Fill one template sheet. Only cell.value is set — no styling touched.
-    Returns number of rows written.
-    """
-    start_row   = _data_start_row(canonical)
-    prefix_cols = _prefix_cols(canonical)
+    start_row   = _data_start_row(stage)
     current_row = start_row
 
     for rec in records:
         rid = rec.get("report_id")
 
-        # Prefix columns
-        for col_idx, key in prefix_cols:
-            raw = rec.get(key)
+        for field_key in FIELD_LABEL_ALIASES:
+            raw = rec.get(field_key)
             if raw is None:
                 continue
-            value = _normalise(key, raw)
+            col_idx = _resolve_field_col(field_key, header_map)
+            if col_idx is None:
+                continue
+            value = _normalise(field_key, raw)
             if value is not None:
                 ws.cell(row=current_row, column=col_idx).value = value
 
-        # Defect columns — placed by template header position
         for d in defect_items_by_report.get(rid, []):
-            item_name = (d.get("item") or "").strip()           # "item" key kept in export_view
+            item_name = (d.get("item") or "").strip()
             if not item_name:
                 continue
             major = _to_int(d.get("major_count", 0))
@@ -411,15 +372,12 @@ def _write_sheet(
             col_idx = _resolve_defect_col(item_name, header_map)
             if col_idx:
                 ws.cell(row=current_row, column=col_idx).value = major
- 
 
         current_row += 1
 
     rows_written = current_row - start_row
     logger.info(
-        "Sheet '%s': wrote %d row(s) | start_row=%d | defect_col_start=%s",
-        ws.title, rows_written, start_row,
-        get_column_letter(_defect_start_col(canonical)),
+        "Stage '%s': wrote %d row(s) starting at row %d", stage, rows_written, start_row,
     )
     return rows_written
 
@@ -432,86 +390,109 @@ def write_summary(
     records: List[Dict[str, Any]],
     defect_items_by_report: Dict[int, List[Dict[str, Any]]],
     output_path: Path,
-    template_path: Path,
-    format_type: str = "WOVEN_78",
-) -> None:
+    report_type: str,
+) -> Dict[str, Any]:
     """
-    Fill the pre-built Excel template and save to output_path.
+    Fill one template per stage present in `records`, merge the filled
+    sheets into a single output workbook (only the stages that actually
+    have data), and save to output_path.
+
+    Returns a summary dict: {"stages_written": [...], "stages_skipped": [...]}
+    stages_skipped entries are {"stage": ..., "reason": ...} — usually
+    "not yet configured" for a (report_type, stage) with no template.
 
     Raises
     ------
-    FileNotFoundError  if template_path does not exist
-    DefectMismatchError if any defect item has no matching template column
-    ValueError          if no records could be written to any sheet
+    DefectMismatchError        any defect item has no matching column in
+                                its stage's template (checked across ALL
+                                stages before anything is written)
+    TemplateNotConfiguredError only stage(s) present have no template at
+                                all — nothing could be produced
     """
-    if not template_path.exists():
-        raise FileNotFoundError(f"Template not found: {template_path}")
-
-    wb = openpyxl.load_workbook(str(template_path), data_only=False)
-
-    # Group by canonical inspection type
-    by_canonical: Dict[str, List[Dict[str, Any]]] = {}
+    # Group by canonical stage
+    by_stage: Dict[str, List[Dict[str, Any]]] = {}
     for rec in records:
-        key = _canonical_type(rec.get("inspection_type") or "")
-        by_canonical.setdefault(key, []).append(rec)
+        stage = _canonical_stage(rec.get("inspection_type") or "")
+        by_stage.setdefault(stage, []).append(rec)
 
-    # Pre-flight: validate all defect items BEFORE writing anything
-    mismatches = _validate_defects(wb, by_canonical, defect_items_by_report)
-    if mismatches:
-        raise DefectMismatchError(mismatches)
+    present_stages = [s for s in STAGE_ORDER if s in by_stage]
+    unknown = [s for s in by_stage if s not in STAGE_ORDER]
+    if unknown:
+        logger.warning("Unrecognised inspection stage(s), skipped: %s", unknown)
 
-    process_order = ["FINAL", "RE-FINAL", "INLINE"] + [
-        k for k in by_canonical if k not in ("FINAL", "RE-FINAL", "INLINE")
-    ]
-
-    sheets_written = 0
-    skipped_types: List[str] = []
-
-    for canonical in process_order:
-        type_records = by_canonical.get(canonical)
-        if not type_records:
-            continue
-
-        sheet_name = SHEET_NAME_MAP.get(canonical)
-        if not sheet_name:
-            skipped_types.append(canonical)
+    # Resolve templates, tracking what's usable vs. what's missing
+    stage_templates: Dict[str, Path] = {}
+    stages_skipped: List[Dict[str, str]] = []
+    for stage in present_stages:
+        try:
+            stage_templates[stage] = resolve_template(report_type, stage)
+        except TemplateNotConfiguredError as exc:
+            stages_skipped.append({"stage": stage, "reason": exc.reason})
             logger.warning(
-                "No template sheet for type '%s' (%d record(s) skipped).",
-                canonical, len(type_records),
+                "Skipping stage '%s' (%d record(s)): %s",
+                stage, len(by_stage[stage]), exc.reason,
             )
-            continue
 
+    if not stage_templates:
+        # Nothing at all could be produced — raise the most informative error
+        first_stage = present_stages[0] if present_stages else "UNKNOWN"
+        raise TemplateNotConfiguredError(
+            report_type, first_stage,
+            f"no configured template for any present stage {present_stages}",
+        )
+
+    # Pre-flight: validate ALL defect items across ALL usable stages
+    # before writing anything.
+    stage_workbooks: Dict[str, Any] = {}
+    stage_header_maps: Dict[str, Dict[str, int]] = {}
+    all_mismatches: List[Dict[str, Any]] = []
+
+    for stage, template_path in stage_templates.items():
+        wb = openpyxl.load_workbook(str(template_path), data_only=False)
+        sheet_name = SHEET_NAME_MAP[stage]
         if sheet_name not in wb.sheetnames:
-            skipped_types.append(canonical)
-            logger.warning(
-                "Sheet '%s' not in template '%s' — skipping %d record(s).",
-                sheet_name, template_path.name, len(type_records),
+            raise ValueError(
+                f"Template '{template_path.name}' has no sheet named "
+                f"'{sheet_name}' (expected for stage '{stage}')."
             )
-            continue
+        ws = wb[sheet_name]
+        header_map = _build_header_map(ws)
 
-        ws           = wb[sheet_name]
-        header_map   = _build_defect_header_map(ws, _defect_start_col(canonical))
+        stage_workbooks[stage]   = wb
+        stage_header_maps[stage] = header_map
 
-        _write_sheet(
+        all_mismatches.extend(_validate_defects(
+            stage, header_map, by_stage[stage], defect_items_by_report, sheet_name,
+        ))
+
+    if all_mismatches:
+        raise DefectMismatchError(all_mismatches)
+
+    # Write + merge
+    output_wb = openpyxl.Workbook()
+    output_wb.remove(output_wb.active)  # drop default blank sheet
+
+    stages_written: List[str] = []
+    for stage, wb in stage_workbooks.items():
+        sheet_name = SHEET_NAME_MAP[stage]
+        ws = wb[sheet_name]
+        _write_stage_sheet(
             ws=ws,
-            records=type_records,
+            stage=stage,
+            records=by_stage[stage],
             defect_items_by_report=defect_items_by_report,
-            canonical=canonical,
-            header_map=header_map,
+            header_map=stage_header_maps[stage],
         )
-        sheets_written += 1
-
-    if not sheets_written:
-        raise ValueError(
-            "No records written — no inspection types matched a template sheet."
-        )
-
-    if skipped_types:
-        logger.warning("Skipped types (no template sheet): %s", skipped_types)
+        copy_sheet(ws, output_wb, sheet_name)
+        stages_written.append(stage)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(str(output_path))
+    output_wb.save(str(output_path))
+
     logger.info(
-        "Summary saved → %s  (template=%s format=%s sheets=%d)",
-        output_path, template_path.name, format_type, sheets_written,
+        "Summary saved → %s (report_type=%s stages_written=%s stages_skipped=%s)",
+        output_path, report_type, stages_written,
+        [s["stage"] for s in stages_skipped],
     )
+
+    return {"stages_written": stages_written, "stages_skipped": stages_skipped}

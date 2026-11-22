@@ -7,7 +7,7 @@ to internal file layout:
 
     from extraction.core import CellGrid, normalize_text
     from extraction.core import read_sheet, read_all_sheets
-    from extraction.core import resolve_value, resolve_po_wh_value
+    from extraction.core import resolve_value, resolve_po_or_report_number
     from extraction.core import FieldName, DirectionRule, DOFieldName
     from extraction.core import to_display_date, to_iso_date, to_hhmm
 """
@@ -19,7 +19,7 @@ from .sheet_reader import read_sheet, read_first_sheet, read_all_sheets, get_she
 # ── Proximity engine ──────────────────────────────────────────────────────────
 from .proximity import (
     resolve_value,
-    resolve_po_wh_value,
+    date_table,
     resolve_po_or_report_number,
     find_inline_value,
     is_int,
@@ -51,7 +51,6 @@ from .label_map import (
     FieldName,
     DirectionRule,
     DOFieldName,
-    STYLE_COUNTRY_MAP,
     AUDIT_TYPE_PATTERNS,
     NUMERIC_FIELD_NAMES,
     DO_FILL_DOWN_FIELDS,
@@ -64,7 +63,7 @@ __all__ = [
     "CellGrid", "normalize_text",
     "read_sheet", "read_first_sheet", "read_all_sheets", "get_sheet_names",
     # Proximity
-    "resolve_value", "resolve_po_wh_value", "resolve_po_or_report_number",
+    "resolve_value", "resolve_po_or_report_number",
     "find_inline_value", "is_int", "is_valid_po_no", "is_valid_report_no",
     # Normalise
     "strip_time_from_date", "to_display_date", "to_iso_date", "is_valid_display_date",
@@ -73,6 +72,6 @@ __all__ = [
     "calc_defect_percentage",
     # Enums & maps
     "FieldName", "DirectionRule", "DOFieldName",
-    "STYLE_COUNTRY_MAP", "AUDIT_TYPE_PATTERNS",
+    "AUDIT_TYPE_PATTERNS",
     "NUMERIC_FIELD_NAMES", "DO_FILL_DOWN_FIELDS",
 ]

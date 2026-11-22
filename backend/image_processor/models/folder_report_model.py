@@ -8,7 +8,7 @@ from django.utils import timezone
 class FolderReport(BaseModel):
     """
     One row per folder that was processed.
-    Stores the path to the generated PDF output.
+    Stores present DOCX authority; PDF conversion happens on demand.
     """
     batch = models.ForeignKey(
         FolderBatch, on_delete=models.CASCADE, related_name="reports"
@@ -22,7 +22,7 @@ class FolderReport(BaseModel):
     # Which folder this came from (relative path)
     folder_name = models.CharField(max_length=512)
 
-    # Path to the generated PDF output (relative to media/)
+    # Compatibility field name: the authoritative DOCX path relative to MEDIA_ROOT.
     pdf_output_path = models.CharField(max_length=512, blank=True)
 
     # Status of this specific folder processing
@@ -30,6 +30,7 @@ class FolderReport(BaseModel):
         PENDING    = "PENDING",    "Pending"
         PROCESSING = "PROCESSING", "Processing"
         COMPLETED  = "COMPLETED",  "Completed"
+        PARTIAL    = "PARTIAL",    "Partial"
         FAILED     = "FAILED",     "Failed"
 
     status = models.CharField(
@@ -44,8 +45,16 @@ class FolderReport(BaseModel):
 
     # Processing metadata (stored as JSON string)
     metadata = models.TextField(blank=True)
+    submitted_images = models.PositiveIntegerField(default=0)
+    successful_images = models.PositiveIntegerField(default=0)
+    failed_images = models.PositiveIntegerField(default=0)
+    current_attempt = models.ForeignKey(
+        "image_processor.ProcessingAttempt", null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="authoritative_reports",
+    )
 
     class Meta:
+        constraints = [models.UniqueConstraint(fields=["batch", "folder_name"], name="image_report_identity")]
         ordering = ["-created_at", "folder_name"]
         verbose_name = "Folder Report"
         verbose_name_plural = "Folder Reports"

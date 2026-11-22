@@ -1,9 +1,19 @@
-import logging
+import os
 from pathlib import Path
 from datetime import timedelta
-import os
 import sys
+from celery.schedules import crontab
+from dotenv import load_dotenv
+
+import logging
+
+
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+load_dotenv(os.path.join(BASE_DIR, '.env'))
+
+FIELD_ENCRYPTION_KEY = os.environ.get('FIELD_ENCRYPTION_KEY', '')
+
 # Allow importing the top-level workspace `analysis` package from backend code.
 WORKSPACE_ROOT = BASE_DIR.parent
 if str(WORKSPACE_ROOT) not in sys.path:
@@ -13,9 +23,7 @@ WORKSPACE_ROOT = BASE_DIR.parent
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
-
-
-SECRET_KEY = 'django-insecure-bybxt97-yxn5dgy73aljwqk$u41f(af%eiwcx!bj9#$tp2aj%n'
+SECRET_KEY = os.environ.get('SECRET_KEY', '')
 
 
 DEBUG = True
@@ -44,6 +52,9 @@ INSTALLED_APPS = [
     'image_processor.apps.ImageProcessorConfig',
     'final_summary.apps.FinalSummaryConfig',
     'top_five.apps.TopFiveConfig',
+    'mail_download.apps.MailDownloadConfig',
+    'inspection_summary.apps.InspectionSummaryConfig',
+    'encrypted_model_fields',
 ]
 
 MIDDLEWARE = [
@@ -112,7 +123,7 @@ CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
-            "hosts": [(os.getenv('REDIS_HOST', '127.0.0.1'), int(os.getenv('REDIS_PORT', 6379)))],
+            "hosts": [(os.getenv('REDIS_HOST', 'REDIS_HOST_DEV'), int(os.getenv('REDIS_PORT', 'REDIS_PORT_DEV')))],
             # Optional tuning
             "capacity":  1500,   # max messages queued per channel
             "expiry":    60,     # seconds before unread messages are dropped
@@ -175,11 +186,11 @@ WSGI_APPLICATION = 'summary_backend.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.getenv('POSTGRES_DB', 'summary_db'),
-        'USER': os.getenv('POSTGRES_USER', 'postgres'),
-        'PASSWORD': os.getenv('POSTGRES_PASSWORD', 'postgres'),
-        'HOST': os.getenv('POSTGRES_HOST', 'postgres'),
-        'PORT': os.getenv('POSTGRES_PORT', '5432'),
+        'NAME': os.getenv('POSTGRES_DB', 'POSTGRES_DB_DEV'),
+        'USER': os.getenv('POSTGRES_USER', 'POSTGRES_USER_DEV'),
+        'PASSWORD': os.getenv('POSTGRES_PASSWORD', 'POSTGRES_PASSWORD_DEV'),
+        'HOST': os.getenv('POSTGRES_HOST', 'POSTGRES_HOST_DEV'),
+        'PORT': os.getenv('POSTGRES_PORT', 'POSTGRES_PORT_DEV'),
     }
 }
 
@@ -224,13 +235,15 @@ TEMPLATE_URL = "/media/templates/"
 TEMPLATE_ROOT = MEDIA_ROOT / "templates"
 
 # Log files
-
 LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
-
 class AppUserDateHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self._cache = set()
+
     """Routes logs to logs/<app>/<username>/<date>.log"""
     def emit(self, record):
         try:
@@ -276,16 +289,16 @@ LOGGING = {
         'file_app': {
             'level': 'DEBUG',
             'class': 'logging.handlers.RotatingFileHandler',
-            'filename': os.path.join(LOG_DIR, 'app.log'),
-            'maxBytes': 10485760,  # 10 MB
+            'filename': str(LOG_DIR / 'app.log'),
+            'maxBytes': 10485760,
             'backupCount': 5,
             'formatter': 'extraction',
         },
         'file_final_summary': {
             'level': 'DEBUG',
             'class': 'logging.handlers.RotatingFileHandler',
-            'filename': os.path.join(LOG_DIR, 'final_summary', 'extraction.log'),
-            'maxBytes': 10485760,  # 10 MB
+            'filename': str(LOG_DIR / 'final_summary' / 'extraction.log'),
+            'maxBytes': 10485760,
             'backupCount': 5,
             'formatter': 'extraction',
         },
@@ -325,35 +338,47 @@ LOGGING = {
 
 PUMA_SETTINGS = {
     "CERTIFICATE_TEMPLATE_PATH": TEMPLATE_ROOT / "CERTIFICATE.docx",
-    "OUTPUT_DIR":        BASE_DIR / "media/output/puma",
-    "RENAMED_PDF_DIR":   BASE_DIR / "media/output/puma/renamed_pdfs",
-    "CERTIFICATE_DIR":   BASE_DIR / "media/output/puma/certificates",
+    "OUTPUT_DIR":        MEDIA_ROOT / "output/puma",
+    "RENAMED_PDF_DIR":   MEDIA_ROOT / "output/puma/renamed_pdfs",
+    "CERTIFICATE_DIR":   MEDIA_ROOT / "output/puma/certificates",
 }
 
 IMAGE_PROCESSOR_SETTINGS = {
     "DEFECT_IMAGE_TEMPLATE_PATH": TEMPLATE_ROOT / "Defec_pictures.docx",
-    "OUTPUT_DIR" :        BASE_DIR / "media/output/defect_image",
-    "DEFECT_PDF" :        BASE_DIR / "media/output/defect_image/renamed_pdfs",
-    "DEFECT_DOCX":        BASE_DIR / "media/output/defect_image/defect_docx",
+    "OUTPUT_DIR" :        MEDIA_ROOT / "output/defect_image",
+    "DEFECT_PDF" :        MEDIA_ROOT / "output/defect_image/renamed_pdfs",
+    "DEFECT_DOCX":        MEDIA_ROOT / "output/defect_image/defect_docx",
 }
 
 TOP_FIVE_SETTINGS = {
     "TOP_FIVE_TEMPLATE_PATH": TEMPLATE_ROOT / "template.xlsx",
-    "OUTPUT_DIR" :        BASE_DIR / "media/output/top_five",
+    "OUTPUT_DIR" :        MEDIA_ROOT / "output/top_five",
 }
 
 # Celery Setup
 
 
-CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
+CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'CELERY_BROKER_URL_DEV')
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 
 CELERY_TASK_DEFAULT_QUEUE = 'celery'
 CELERY_TASK_ROUTES = {
-    'puma_summary.process_inspection_batch': {'queue': 'celery'},
-    'puma_summary.retry_failed_pdfs':        {'queue': 'celery'},
-    'image_processor.process_defect_docx':   {'queue': 'celery'},
+    'puma_summary.process_inspection_batch': {'queue': 'puma_summary'},
+    'puma_summary.retry_failed_pdfs':        {'queue': 'puma_summary'},
+    'image_processor.process_defect_docx':   {'queue': 'image_processor'},
     'final_summary.process_audit_upload':    {'queue': 'celery'},
     'top_five.run_top5_job':                 {'queue': 'celery'},
+}
+
+CELERY_BEAT_SCHEDULE = {
+    "inspection-summary-cleanup-hourly": {
+        "task": "inspection_summary.cleanup_expired",
+        "schedule": crontab(minute=15),
+    },
+    # Runs every day at 02:00 AM server time
+    "cleanup-temp-dirs-daily": {
+        "task":     "image_processor.cleanup_temp_dirs",
+        "schedule": crontab(hour=2, minute=0),
+    },
 }

@@ -18,18 +18,13 @@ export default function OutputPanel() {
   const exportableTypes = ["batch", "report", "logs", "batch-list", "report-list", "top5-job-list", "top5-job"];
 
   return (
-    <main
+    <main className="flex flex-1 flex-col w-min-0 overflow-hidden"
       style={{
-        flex: 1,
         background: "var(--color-bg)",
-        display: "flex",
-        flexDirection: "column",
-        overflow: "hidden",
-        minWidth: 0,
       }}
     >
       {/* Output toolbar */}
-      <div
+      <div 
         style={{
           height: "44px",
           background: "var(--color-surface)",
@@ -124,7 +119,7 @@ export default function OutputPanel() {
             <EmptyState />
           ) : output.source === "audit" ? (
             <AuditOutput output={output} />
-          ) : output.type === "batch" || output.type === "batch-list" || output.type === "logs" || output.type === "batch-progress" ? (
+          ) : output.type === "batch" || output.type === "batch-list" || output.type === "logs" || output.type === "batch-progress" || output.type === "image-settings" ? (
             <BatchOutput output={output} />
           ) : output.type === "report" || output.type === "report-list" ? (
             <ReportOutput output={output} />
@@ -167,7 +162,7 @@ function EmptyState() {
       >
         ◎
       </div>
-      <span
+      <span className="text-[11px] tracking-[0.08em]"
         style={{
           fontFamily: "var(--font-mono)",
           fontSize: "11px",
@@ -183,12 +178,12 @@ function EmptyState() {
 
 function LoadingState() {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+    <div className="flex flex-col gap-2.5" >
       {[100, 80, 90, 60].map((w, i) => (
         <div
           key={i}
-          className="skeleton"
-          style={{ height: "18px", width: `${w}%`, borderRadius: "4px" }}
+          className="skeleton rounded-sm h-4.5 "
+          style={{ width: `${w}%` }}
         />
       ))}
     </div>

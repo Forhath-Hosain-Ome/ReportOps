@@ -34,7 +34,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ..models.audit_record import AuditRecord
+from .db_manager import AuditRecord
 
 
 # ---------------------------------------------------------------------------

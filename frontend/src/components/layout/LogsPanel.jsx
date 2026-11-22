@@ -1,5 +1,5 @@
 import { useOutputStore } from "../../store/outputStore";
-import clsx from "clsx";
+
 
 const LEVEL_COLORS = {
   info:    "var(--color-accent2)",

@@ -6,6 +6,16 @@ import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
   globalIgnores(['dist']),
+
+  // Node config files
+  {
+    files: ['vite.config.js'],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
+  
+  // React application
   {
     files: ['**/*.{js,jsx}'],
     extends: [

@@ -1,0 +1,10 @@
+# Non-secret Compose inputs; real files must live outside the repository/build context.
+BACKEND_IMAGE=uqgu-backend:REPLACE_WITH_RECORDED_IMAGE
+FRONTEND_IMAGE=uqgu-frontend:REPLACE_WITH_RECORDED_IMAGE
+POSTGRES_DB=REPLACE_WITH_ENVIRONMENT_DATABASE
+POSTGRES_USER=REPLACE_WITH_ENVIRONMENT_ROLE
+SECRETS_DIR=/absolute/private/environment/secrets
+RUNTIME_ENV_FILE=/absolute/private/environment/runtime.env
+NGINX_CONFIG_FILE=/absolute/private/environment/nginx.conf
+# Production only: the specific LAN interface, never an unspecified wildcard.
+PRODUCTION_LAN_IP=REPLACE_WITH_LAN_INTERFACE

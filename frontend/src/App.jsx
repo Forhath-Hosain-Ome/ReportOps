@@ -1,11 +1,9 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useAuthStore } from "./store/authStore";
-import LoginPage from "./pages/LoginPage";
-import PumaPage  from "./pages/PumaPage";
-import AuditSummaryPage from "./pages/AuditSummaryPage";
-import DefectImagePage from "./pages/DefectImagePage";
-import Top5Page from "./pages/TopFivePage";
+import {LoginPage, PumaPage, AuditSummaryPage, DefectImagePage, Top5Page, MailFetchPage, InspectionSummaryPage }  from "./pages/index";
+
+import DashboardLayout from "./components/layout/DashboardLayout";
 
 const qc = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 30_000 } },
@@ -21,11 +19,17 @@ export default function App() {
     <QueryClientProvider client={qc}>
       <BrowserRouter>
         <Routes>
-          <Route path="/login" 
+          <Route path="/login" element={ <LoginPage /> }/>
+
+          <Route
             element={
-              <LoginPage />
-            } 
-          />
+              <RequireAuth>
+                <DashboardLayout />
+              </RequireAuth>
+            }
+          >
+            <Route path="/inspection-summary" element={<InspectionSummaryPage />} />
+          </Route>
 
           <Route path="/puma"
             element={
@@ -53,6 +57,14 @@ export default function App() {
             element={
               <RequireAuth>
                 <Top5Page />
+              </RequireAuth>
+            }
+          />
+
+          <Route path="/mail-fetch"
+            element={
+              <RequireAuth>
+                <MailFetchPage />
               </RequireAuth>
             }
           />

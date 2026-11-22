@@ -10,22 +10,31 @@ from __future__ import annotations
 
 import logging
 import os
-import tempfile
-import zipfile
+import shutil
 from pathlib import Path
 from typing import Optional
 
 from celery import shared_task
+from celery.exceptions import Retry
 from django.conf import settings
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.image.exceptions import (
+    InvalidImageStreamError,
+    UnexpectedEndOfFileError,
+    UnrecognizedImageError,
+)
+from docx.image.image import Image as DocxImage
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from docx.shared import Inches, Pt, RGBColor
-from PIL import Image
+from PIL import Image, ImageOps
 
 from image_processor.models import FolderBatch, FolderReport, FolderFailedPDF
-from services.file_manager.copy_and_rename import copy_and_rename
+from image_processor.output_paths import (
+    OutputPathError, open_output_file, output_directory, output_path,
+    report_filename, validate_report_date,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +45,7 @@ def _get_channel_layer():
 
 
 def _group_name(batch_id: int) -> str:
-    return f"batch_{batch_id}"
+    return f"image_batch_{batch_id}"
 
 
 def _push(group: str, message: dict):
@@ -44,7 +53,7 @@ def _push(group: str, message: dict):
         from asgiref.sync import async_to_sync
         layer = _get_channel_layer()
         async_to_sync(layer.group_send)(group, message)
-    except RuntimeError as e:
+    except Exception as e:
         if "cannot schedule new futures after interpreter shutdown" in str(e):
             logger.debug("Skipping channel push during shutdown: %s", e)
         else:
@@ -52,33 +61,13 @@ def _push(group: str, message: dict):
 
 
 def _push_progress(batch: FolderBatch, stage: str = ""):
-    _push(_group_name(batch.pk), {
-        "type":             "batch.progress",
-        "batch_id":         batch.pk,
-        "status":           batch.status,
-        "stage":            stage,
-        "progress_percent": batch.progress_percent,
-        "processed":        batch.processed_folders,
-        "total":            batch.total_folders,
-        "failed":           batch.failed_folders,
-        "success_rate":     batch.success_rate,
-    })
+    from image_processor.progress import progress_payload
+    _push(_group_name(batch.pk), {**progress_payload(batch), "type": "batch.progress", "stage": stage})
 
 
 def _push_complete(batch: FolderBatch):
-    _push(_group_name(batch.pk), {
-        "type":             "batch.complete",
-        "batch_id":         batch.pk,
-        "status":           batch.status,
-        "progress_percent": 100,
-        "processed":        batch.processed_folders,
-        "total":            batch.total_folders,
-        "failed":           batch.failed_folders,
-        "success_rate":     batch.success_rate,
-        "report_count":     batch.reports.count(),
-        "failed_details":   [],
-        "excel_available":  False,
-    })
+    from image_processor.progress import progress_payload
+    _push(_group_name(batch.pk), {**progress_payload(batch), "type": "batch.complete"})
 
 
 def _push_error(batch: FolderBatch, message: str):
@@ -104,6 +93,8 @@ VALID_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".webp", "
 
 IMG_WIDTH_INCHES  =  4.51
 IMG_HEIGHT_INCHES =  3.68
+MIN_RASTER_BOUND_PX = 1600
+JPEG_QUALITY = 95
 
 IMAGES_PER_PAGE = 2
 
@@ -114,17 +105,65 @@ def _is_valid_image(filename: str) -> bool:
     return Path(filename).suffix.lower() in VALID_EXTENSIONS
 
 
-def _prepare_image(image_path: str, dest_dir: Path) -> Optional[Path]:
-    """
-    Convert and resize an image to JPEG at 325x265 px.
-    Returns the dest Path, or None on failure.
+def _is_docx_compatible_image(image_path: Path) -> bool:
+    try:
+        DocxImage.from_file(str(image_path))
+    except (InvalidImageStreamError, UnexpectedEndOfFileError, UnrecognizedImageError):
+        return False
+    return True
+
+
+def _prepare_image(image_path: str, dest_dir: Path, *, output_root: Path,
+                   dimensions=(325, 265)) -> Optional[Path]:
+    """Prepare a JPEG without upscaling or reducing it below the quality floor.
+
+    ``dimensions`` remains the job's preferred raster bound. Values below the
+    inspection-quality floor cannot force a thumbnail; larger values remain
+    available for deployments that intentionally retain more source pixels.
     """
     source = Path(image_path)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / (source.stem + ".jpg")
+    relative = str(dest_dir / (source.stem + ".jpg"))
+    dest = output_path(output_root, relative)
+    created = False
 
     try:
-        img = Image.open(source)
+        if not source.is_file():
+            raise FileNotFoundError("Accepted source image is unavailable.")
+        try:
+            with Image.open(source) as original:
+                source_format = (original.format or "").upper()
+                orientation = original.getexif().get(274, 1)
+                original.load()
+                img = ImageOps.exif_transpose(original)
+                img.load()
+        except (Image.UnidentifiedImageError, Image.DecompressionBombError, ValueError):
+            return None
+        except OSError as exc:
+            if exc.errno is not None:
+                raise  # Permission, missing source and I/O failures are infrastructure failures.
+            return None  # Pillow's truncated/unsupported decoder errors have no OS errno.
+
+        requested_width, requested_height = dimensions
+        max_dimensions = (
+            max(requested_width, MIN_RASTER_BOUND_PX),
+            max(requested_height, MIN_RASTER_BOUND_PX),
+        )
+        resized = img.width > max_dimensions[0] or img.height > max_dimensions[1]
+        if resized:
+            img.thumbnail(max_dimensions, Image.Resampling.LANCZOS)
+
+        copy_source = (
+            source_format in {"JPEG", "JPG"}
+            and orientation in (None, 1)
+            and not resized
+            and img.mode == "RGB"
+            and _is_docx_compatible_image(source)
+        )
+        if copy_source:
+            with source.open("rb") as source_stream, open_output_file(output_root, relative) as stream:
+                created = True
+                shutil.copyfileobj(source_stream, stream)
+            return dest
 
         if img.mode in ("RGBA", "LA", "P"):
             bg = Image.new("RGB", img.size, (255, 255, 255))
@@ -136,20 +175,21 @@ def _prepare_image(image_path: str, dest_dir: Path) -> Optional[Path]:
         elif img.mode != "RGB":
             img = img.convert("RGB")
 
-        img = img.resize((325, 265), Image.Resampling.LANCZOS)
-
         import io as _io
         buf = _io.BytesIO()
-        img.save(buf, "JPEG", quality=95)
-        dest.write_bytes(buf.getvalue())
-        source.unlink(missing_ok=True)
+        img.save(buf, "JPEG", quality=JPEG_QUALITY, optimize=True, subsampling=0)
+        with open_output_file(output_root, relative) as stream:
+            created = True
+            stream.write(buf.getvalue())
         return dest
 
+    except OutputPathError:
+        raise
     except Exception as exc:
         logger.error("Image prepare failed for %s: %s", image_path, exc)
-        if dest.exists():
+        if created and dest.exists():
             dest.unlink(missing_ok=True)
-        return None
+        raise
 
 
 # ── DOCX helpers ──────────────────────────────────────────────────────────────
@@ -284,7 +324,11 @@ def _add_image_paragraph(doc: Document, image_path: str) -> None:
     para = doc.add_paragraph()
     para.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = para.add_run()
-    run.add_picture(image_path, width=Inches(IMG_WIDTH_INCHES))
+    run.add_picture(
+        image_path,
+        width=Inches(IMG_WIDTH_INCHES),
+        height=Inches(IMG_HEIGHT_INCHES),
+    )
 
 
 # ── Per-folder DOCX generation ────────────────────────────────────────────────
@@ -297,6 +341,7 @@ def _generate_docx(
     image_paths: list[str],
     output_docx_path: str,
     *,
+    output_root: Path,
     mode: str = "basic",
     label_style: Optional[dict] = None,
     translations: Optional[dict[str, str]] = None,
@@ -361,11 +406,9 @@ def _generate_docx(
                 )
 
             _add_image_paragraph(doc, img_path)
-
-    os.makedirs(os.path.dirname(output_docx_path), exist_ok=True)
-    doc.save(output_docx_path)
-    os.chmod(output_docx_path, 0o644)
-    logger.info("DOCX saved: %s", output_docx_path)
+    with open_output_file(output_root, output_docx_path) as stream:
+        doc.save(stream)
+    logger.info("DOCX saved for report")
 
 
 # ── Translation helper ────────────────────────────────────────────────────────
@@ -389,267 +432,135 @@ def _translate_names(names: list[str], target_language: str) -> dict[str, str]:
 
 # ── Temp-dir cleanup ─────────────────────────────────────────────────────────
 
-def _rmtree(path: Path) -> None:
-    """Recursively delete a directory using only pathlib — no shutil."""
-    if not path.exists():
-        return
-    for child in path.iterdir():
-        if child.is_dir():
-            _rmtree(child)
-        else:
-            child.unlink(missing_ok=True)
-    path.rmdir()
+LOCK_CONTENTION_MAX_RETRIES = 2
+LOCK_CONTENTION_BASE_DELAY = 60
 
 
-# ── Main Celery task ──────────────────────────────────────────────────────────
+def _retry_contended_dispatch(task, batch_id, generation, token):
+    from image_processor.lifecycle import dispatch_needs_delivery, fail_unclaimed_dispatch
 
-@shared_task(
-    bind=True,
-    max_retries=2,
-    soft_time_limit=1200,
-    time_limit=1500,
-    name="image_processor.process_defect_docx",
-)
-def process_defect_docx_task(
-    self,
-    batch_id: int,
-    source_folder: str,
-    date: str = "",
-    is_renamed_file: bool = False,
-    label_type: str = "Defect_GMTS_pictures_report_for_Style",
-    mode: str = "basic",
-    label_style: Optional[dict] = None,
-    use_translation: bool = False,
-    translation_language: str = "en",
-    template_path: Optional[str] = None,
-) -> dict:
-    if label_style is None:
-        label_style = {}
-
-    # ── Resolve output base from settings ──────────────────────────────────
-    # FIX: output_base was undefined in original code — this caused NameError
-    # crashing every task immediately after it reached PROCESSING state.
-    image_settings = getattr(settings, "IMAGE_PROCESSOR_SETTINGS", {})
-    output_base = Path(image_settings.get("OUTPUT_DIR", settings.BASE_DIR / "media" / "output" / "defect_image"))
-
-    # ── Resolve template ──────────────────────────────────────────────────
-    if not template_path:
-        template_path = str(
-            Path(image_settings.get(
-                "DEFECT_IMAGE_TEMPLATE_PATH",
-                settings.BASE_DIR / "media" / "templates" / "defect_image.docx"
-            ))
-        )
-    if not os.path.exists(template_path):
-        raise FileNotFoundError(f"Template not found: {template_path}")
-
-    # ── Load batch ────────────────────────────────────────────────────────
+    if not dispatch_needs_delivery(batch_id, generation, token):
+        return {"ignored": "Dispatch no longer needs delivery"}
+    if task.request.retries >= LOCK_CONTENTION_MAX_RETRIES:
+        if fail_unclaimed_dispatch(batch_id, generation, token, "DISPATCH_LOCK_RETRY_EXHAUSTED"):
+            raise RuntimeError("Image dispatch lock retries exhausted; recovery is required.")
+        return {"ignored": "Dispatch no longer needs delivery"}
+    countdown = LOCK_CONTENTION_BASE_DELAY * (2 ** task.request.retries)
     try:
-        batch = FolderBatch.objects.get(pk=batch_id)
-    except FolderBatch.DoesNotExist:
-        logger.error("process_defect_docx_task: batch #%s not found", batch_id)
-        return {"error": "Batch not found"}
-
-    batch.status = FolderBatch.Status.PROCESSING
-    batch.save(update_fields=["status"])
-    _push_progress(batch, stage="PROCESSING")
-
-    source_path = Path(source_folder)
-    if not source_path.exists():
-        logger.error("Source folder missing: %s", source_folder)
-        batch.status = FolderBatch.Status.FAILED
-        batch.error_log = f"Source folder not found: {source_folder}"
-        batch.save(update_fields=["status", "error_log"])
-        _push_error(batch, batch.error_log)
-        return {"error": batch.error_log}
-
-    folders = [f for f in source_path.iterdir() if f.is_dir()]
-
-    if not folders:
-        # Treat the source folder itself as a single folder of images
-        folders = [source_path]
-
-    # Update total_folders in case view saved wrong count
-    if batch.total_folders != len(folders):
-        batch.total_folders = len(folders)
-        batch.save(update_fields=["total_folders"])
-
-    try:
-        # Determine effective mode and label_style based on is_renamed_file flag
-        effective_mode = mode
-        effective_label_style = dict(label_style) if label_style else {}
-        if is_renamed_file:
-            effective_mode = "named"
-            effective_label_style.update({
-                "color_hex": "FFFFFF",
-                "font_size_pt": 14,
-                "highlight_color": "red",
-            })
-
-        for folder_path in folders:
-            folder_name = folder_path.name
-            folder_extract_dir = folder_path
-
-            # FIX: output_base now defined above from settings
-            folder_output_dir = output_base / str(batch_id) / folder_name
-            folder_output_dir.mkdir(parents=True, exist_ok=True, mode=0o755)
-
-            # FIX: Create FolderReport BEFORE inner try so it exists for error logging
-            report = FolderReport.objects.create(
-                batch=batch,
-                folder_name=folder_name,
-                status=FolderReport.Status.PROCESSING,
-            )
-
-            try:
-                # ── Collect + sort images ─────────────────────────────────
-                raw_images = sorted([
-                    str(p)
-                    for p in folder_extract_dir.rglob("*")
-                    if p.is_file() and _is_valid_image(p.name)
-                ])
-
-                if not raw_images:
-                    report.status = FolderReport.Status.FAILED
-                    report.error_message = "No valid images found in folder"
-                    report.save()
-                    FolderFailedPDF.objects.create(
-                        batch=batch,
-                        folder_name=folder_name,
-                        reason="No valid images found",
-                    )
-                    batch.failed_folders += 1
-                    batch.save(update_fields=["failed_folders"])
-                    _push_progress(batch, stage="PROCESSING")
-                    continue
-
-                # ── Prepare (convert + resize) images ─────────────────────
-                prepared_dir = folder_output_dir / "_prepared"
-                prepared_dir.mkdir(parents=True, exist_ok=True)
-                prepared = []
-                for img_path in raw_images:
-                    out = _prepare_image(img_path, prepared_dir)
-                    if out:
-                        prepared.append(str(out))
-                    else:
-                        logger.warning("Skipping unprepable image: %s", img_path)
-
-                if not prepared:
-                    report.status = FolderReport.Status.FAILED
-                    report.error_message = "All images failed conversion"
-                    report.save()
-                    FolderFailedPDF.objects.create(
-                        batch=batch,
-                        folder_name=folder_name,
-                        reason="All images failed conversion",
-                    )
-                    batch.failed_folders += 1
-                    batch.save(update_fields=["failed_folders"])
-                    _push_progress(batch, stage="PROCESSING")
-                    continue
-
-                # ── Build translations if needed ──────────────────────────
-                translations: dict[str, str] = {}
-                if effective_mode == "translated" and use_translation:
-                    stems = [Path(p).stem for p in prepared]
-                    translations = _translate_names(stems, translation_language)
-
-                # ── Generate DOCX ─────────────────────────────────────────
-                safe_folder = folder_name.replace(" ", "_")
-                safe_date   = (date or "no-date").replace(" ", "_")
-                docx_filename = f"{label_type}_{safe_folder}_dated at{safe_date}.docx"
-                docx_output_path = str(folder_output_dir / docx_filename)
-
-                _generate_docx(
-                    template_path    = template_path,
-                    style_name       = folder_name,
-                    date_str         = date,
-                    label_type       = label_type,
-                    image_paths      = prepared,
-                    output_docx_path = docx_output_path,
-                    mode             = effective_mode,
-                    label_style      = effective_label_style,
-                    translations     = translations,
-                )
-
-                # ── Update report record ──────────────────────────────────
-                rel_path = os.path.relpath(
-                    docx_output_path,
-                    str(Path(settings.BASE_DIR) / "media"),
-                )
-                report.status          = FolderReport.Status.COMPLETED
-                report.image_count     = len(prepared)
-                report.pdf_output_path = rel_path
-                report.save()
-
-                batch.processed_folders += 1
-                batch.save(update_fields=["processed_folders"])
-                _push_progress(batch, stage="PROCESSING")
-
-                logger.info(
-                    "Folder '%s' done — %d image(s) | mode=%s | batch #%s",
-                    folder_name, len(prepared), mode, batch_id,
-                )
-
-            except Exception as exc:
-                logger.exception(
-                    "Folder '%s' failed in batch #%s: %s",
-                    folder_name, batch_id, exc,
-                )
-                report.status        = FolderReport.Status.FAILED
-                report.error_message = str(exc)
-                report.save()
-                FolderFailedPDF.objects.create(
-                    batch=batch,
-                    folder_name=folder_name,
-                    reason=str(exc),
-                )
-                batch.failed_folders += 1
-                batch.save(update_fields=["failed_folders"])
-
-        # ── Finalise batch status ─────────────────────────────────────────
-        batch.refresh_from_db()
-        if batch.failed_folders == 0:
-            batch.status = FolderBatch.Status.COMPLETED
-        elif batch.processed_folders == 0:
-            batch.status = FolderBatch.Status.FAILED
-        else:
-            batch.status = FolderBatch.Status.PARTIAL
-        batch.save(update_fields=["status"])
-        _push_complete(batch)
-
-        logger.info(
-            "Batch #%s complete — processed: %d, failed: %d",
-            batch_id, batch.processed_folders, batch.failed_folders,
-        )
-        return {
-            "batch_id":  batch_id,
-            "status":    batch.status,
-            "processed": batch.processed_folders,
-            "failed":    batch.failed_folders,
-        }
-
-    except Exception as exc:
-        logger.exception("process_defect_docx_task crashed for batch #%s", batch_id)
-        try:
-            batch.status    = FolderBatch.Status.FAILED
-            batch.error_log = str(exc)
-            batch.save(update_fields=["status", "error_log"])
-            _push_error(batch, str(exc))
-        except Exception:
-            pass
-        # FIX: Don't retry — the source folder is cleaned up in finally,
-        # so retries would always fail with "folder not found".
-        # Instead just re-raise so Celery marks the task as FAILURE.
+        # Celery publishes the replacement with the same task/dispatch identity
+        # before Retry lets the worker acknowledge this delivery.
+        raise task.retry(exc=RuntimeError("Image batch execution lock is busy."),
+                         countdown=countdown, max_retries=LOCK_CONTENTION_MAX_RETRIES)
+    except Retry:
+        raise
+    except Exception:
+        # A failed retry publication must leave an explicit recovery route, not
+        # PENDING/QUEUED with no runnable broker delivery.
+        fail_unclaimed_dispatch(batch_id, generation, token, "DISPATCH_LOCK_RETRY_PUBLISH_FAILED")
         raise
 
-    finally:
-        # FIX: Only clean up source folder after ALL retries are exhausted.
-        # Previously this ran even on retry, deleting files before retry ran.
-        # Now we only clean up on the final execution (no pending retries).
-        # The view uses tempfile.mkdtemp() so OS will eventually reclaim it,
-        # but we clean it explicitly here to avoid disk accumulation.
+
+# Main task identity and public alias remain compatible with existing routing.
+@shared_task(bind=True, max_retries=LOCK_CONTENTION_MAX_RETRIES, acks_late=True,
+             soft_time_limit=1200, time_limit=1500,
+             name="image_processor.process_defect_docx")
+def process_defect_docx_task(
+    self, batch_id: int, source_folder: str, date: str = "",
+    is_renamed_file: bool = False,
+    label_type: str = "Defect_GMTS_pictures_report_for_Style", mode: str = "basic",
+    label_style: Optional[dict] = None, use_translation: bool = False,
+    translation_language: str = "en", template_path: Optional[str] = None,
+    dispatch_generation=None, dispatch_token=None,
+) -> dict:
+    from image_processor.coordination import batch_lock, StaleExecution
+    from image_processor.lifecycle import (
+        claim_execution, finish_report, fail_execution, reconcile, reconciliation_failed,
+    )
+    from image_processor.retention_paths import source_directory, output_root
+    from image_processor.upload_paths import contained_upload_path
+    from image_processor.models import ProcessingAttempt
+
+    if dispatch_generation is None or dispatch_token is None:
+        return {"ignored": "Missing durable dispatch identity"}
+    with batch_lock(batch_id) as acquired:
+        if not acquired:
+            return _retry_contended_dispatch(self, batch_id, dispatch_generation, dispatch_token)
+        batch = claim_execution(batch_id, dispatch_generation, dispatch_token)
+        if batch is None:
+            return {"ignored": "Dispatch is no longer claimable"}
+        reconciling = False
         try:
-            _rmtree(Path(source_folder))
-        except Exception as e:
-            logger.warning("Cleanup of source folder failed: %s", e)
+            # All fallible initialization is inside terminal failure handling.
+            image_settings = getattr(settings, "IMAGE_PROCESSOR_SETTINGS", {})
+            output_base = output_root()
+            source = source_directory(batch)
+            if not source.is_dir() or str(source) != str(Path(source_folder).resolve()):
+                raise FileNotFoundError("Retained source is unavailable.")
+            date = validate_report_date(batch.job_options.get("date", date))
+            template_path = template_path or str(image_settings.get(
+                "DEFECT_IMAGE_TEMPLATE_PATH", settings.BASE_DIR / "media/templates/defect_image.docx"))
+            if not Path(template_path).is_file():
+                raise FileNotFoundError("Image report template is unavailable.")
+            effective_mode = "named" if is_renamed_file else mode
+            effective_style = dict(label_style or {})
+            if is_renamed_file:
+                effective_style.update(color_hex="FFFFFF", font_size_pt=14, highlight_color="red")
+            _push_progress(batch, stage="PROCESSING")
+            attempts = ProcessingAttempt.objects.filter(
+                report__batch=batch, generation=dispatch_generation,
+                dispatch_token=dispatch_token, run_token=batch.active_run_token,
+                status="PROCESSING", report_id__in=batch.intended_reports,
+            ).select_related("report")
+            for attempt in attempts:
+                report = attempt.report
+                folder_label = Path(report.folder_name).name if report.folder_name != "." else "uploaded"
+                name = report_filename(folder_label, date, label_type)
+                relative_dir = f"{batch.pk}/{report.pk}/{attempt.pk}"
+                output_directory(output_base, relative_dir)
+                prepared_dir = Path(relative_dir) / "_prepared"
+                output_directory(output_base, prepared_dir.as_posix())
+                prepared, results = [], []
+                for image in report.images.all():
+                    path = contained_upload_path(source, image.relative_path)
+                    out = _prepare_image(str(path), prepared_dir, output_root=output_base,
+                                         dimensions=(batch.settings_snapshot["image_width_px"],
+                                                     batch.settings_snapshot["image_height_px"]))
+                    results.append({"image_id": image.pk, "status": "SUCCEEDED" if out else "FAILED",
+                                    "stage": "PREPARED" if out else "IMAGE_PREPARATION",
+                                    "failure_reason": "" if out else "Image could not be decoded or prepared."})
+                    if out:
+                        prepared.append(str(out))
+                relative_output = ""
+                if prepared:
+                    translations = _translate_names([Path(p).stem for p in prepared], translation_language) \
+                        if effective_mode == "translated" and use_translation else {}
+                    docx_relative = f"{relative_dir}/{name}"
+                    _generate_docx(template_path, folder_label, date, label_type, prepared,
+                                   docx_relative, output_root=output_base, mode=effective_mode,
+                                   label_style=effective_style, translations=translations)
+                    relative_output = output_path(output_base, docx_relative).relative_to(
+                        Path(settings.MEDIA_ROOT).resolve()).as_posix()
+                finish_report(batch, attempt.pk, results, relative_output)
+                _push_progress(FolderBatch.objects.get(pk=batch.pk), stage="PROCESSING")
+            reconciling = True
+            finished = reconcile(batch)
+            _push_complete(finished)
+            return {"batch_id": batch_id, "status": finished.status,
+                    "processed": finished.processed_folders, "failed": finished.failed_folders}
+        except StaleExecution:
+            # A stale process must never attempt terminal failure writes either.
+            raise
+        except Exception:
+            logger.exception("Image execution failed for batch %s", batch_id)
+            if reconciling:
+                reconciliation_failed(batch)
+                raise
+            try:
+                fail_execution(batch)
+                finished = reconcile(batch)
+                _push_complete(finished)
+            except StaleExecution:
+                raise
+            except Exception:
+                reconciliation_failed(batch)
+            raise

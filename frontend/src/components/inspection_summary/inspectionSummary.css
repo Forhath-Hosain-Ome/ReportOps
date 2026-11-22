@@ -1,0 +1,48 @@
+.inspection-summary { width: 100%; max-width: 1440px; min-width: 0; margin: 0 auto; padding: clamp(16px, 3vw, 40px); overflow-wrap: anywhere; }
+.inspection-summary h1, .inspection-summary h2, .inspection-summary h3 { font-family: var(--font-display); margin: 0 0 12px; }
+.inspection-summary h1 { font-size: clamp(26px, 4vw, 36px); }
+.inspection-summary h2 { font-size: 24px; }
+.inspection-summary h3 { font-size: 19px; }
+.inspection-summary h4 { margin: 12px 0 8px; font-weight: 600; }
+.inspection-summary p { margin: 8px 0 16px; }
+.inspection-heading { padding: 8px 0 20px; }
+.inspection-eyebrow { color: var(--color-accent2); font: 12px var(--font-mono); letter-spacing: .12em; }
+.inspection-muted { color: var(--color-text); opacity: .8; }
+.inspection-card { padding: 20px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-surface); margin-bottom: 20px; }
+.inspection-stack { display: grid; gap: 20px; min-width: 0; }
+.inspection-summary .card, .inspection-stack > * { min-width: 0; }
+.inspection-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 12px; min-width: 0; }
+.inspection-grid > * { min-width: 0; }
+.inspection-summary fieldset { padding: 0; border: 0; min-inline-size: 0; width: 100%; }
+.inspection-summary legend { margin-bottom: 16px; font-weight: 600; }
+.inspection-file { display: block; padding: 16px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-panel); }
+.inspection-file input { display: block; width: 100%; max-width: 100%; min-width: 0; margin-top: 12px; }
+.inspection-summary button { padding: 10px 16px; border-radius: 6px; border: 1px solid var(--color-border); background: var(--color-accent); color: white; cursor: pointer; font: inherit; }
+.inspection-summary button:disabled { opacity: .65; cursor: default; }
+.inspection-summary form button { margin-top: 16px; }
+.inspection-summary :is(button, input, [tabindex]):focus-visible { outline: 3px solid var(--color-accent2); outline-offset: 3px; }
+.inspection-section-nav { display: flex; flex-wrap: wrap; gap: 8px; }
+.inspection-section-nav button { background: var(--color-panel); color: var(--color-text); }
+.inspection-section-nav button[aria-current] { background: var(--color-accent); color: white; }
+.inspection-error { padding: 16px; border: 1px solid var(--color-error); border-radius: 8px; margin: 16px 0; }
+.inspection-notice { padding: 20px; border: 1px solid var(--color-border); border-left: 3px solid var(--color-accent2); border-radius: 8px; margin-bottom: 20px; background: var(--color-panel); }
+.inspection-summary ul, .inspection-summary ol { padding-left: 24px; margin: 12px 0; list-style: revert; }
+.inspection-table-scroll { overflow: auto; max-width: 100%; min-width: 0; margin-top: 16px; border: 1px solid var(--color-border); border-radius: 6px; }
+.inspection-summary table { width: 100%; border-collapse: separate; border-spacing: 0; text-align: left; font-size: 14px; }
+.inspection-summary caption { text-align: left; padding: 12px; font-weight: 600; }
+.inspection-summary th, .inspection-summary td { padding: 10px 12px; border-bottom: 1px solid var(--color-border); vertical-align: top; }
+.inspection-summary thead th { background: var(--color-panel); font-weight: 600; }
+.inspection-detail { max-height: 65vh; }
+.inspection-detail table { width: max-content; min-width: 100%; }
+.inspection-detail th, .inspection-detail td { min-width: 130px; max-width: 260px; }
+.inspection-detail thead th { position: sticky; top: 0; z-index: 1; }
+.inspection-column-group { display: block; font: 11px var(--font-mono); color: var(--color-accent2); margin-bottom: 6px; }
+.inspection-row-subtotal { background: var(--color-panel); font-weight: 600; }
+.inspection-row-total { background: var(--color-subtle); font-weight: 700; }
+.inspection-manpower { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 12px; }
+.inspection-manpower dd { margin: 4px 0; }
+@media (min-width: 1000px) { .inspection-comparison { grid-template-columns: minmax(0, 1fr) minmax(0, .85fr) minmax(0, 1fr); } }
+
+.inspection-metrics > div { padding: 12px 14px; border: 1px solid var(--color-border); border-radius: 7px; }
+.inspection-metrics dt { font: 12px var(--font-mono); color: var(--color-text); }
+.inspection-metrics dd { margin: 6px 0 0; font: 700 22px var(--font-display); }

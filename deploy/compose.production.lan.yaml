@@ -1,0 +1,5 @@
+# Use instead of the private overlay, only after Production R1-R17 pass.
+name: uqgu-production
+services:
+  edge:
+    ports: ['${PRODUCTION_LAN_IP:?Set the intended LAN interface}:18443:443']

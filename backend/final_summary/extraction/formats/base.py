@@ -46,13 +46,13 @@ FIX APPLIED (Bug #3 — missing audit_report field)
 Added audit_report field back to AuditRecord dataclass so the pipeline
 never silently drops that piece of data.
 """
-
+from final_summary.db import AuditRecord
 import logging
 import re
-from dataclasses import dataclass, field, asdict
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
+from final_summary.utils import process_extraction
 
 from final_summary.extraction.core import (
     CellGrid,
@@ -60,7 +60,7 @@ from final_summary.extraction.core import (
 )
 from final_summary.extraction.fields import (
     FIELD_EXTRACTORS,
-    extract_with_country,
+    extract_style_no,
     extract_times,
     extract_dates,
     extract_quantities,
@@ -68,96 +68,11 @@ from final_summary.extraction.fields import (
     extract_defects,
     extract_do_table,
     extract_type_from_filename,
+    get_country,
+    extract_item_name,
 )
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# AuditRecord dataclass — the extraction result
-# ---------------------------------------------------------------------------
-
-@dataclass
-class AuditRecord:
-    """
-    All data extracted from one Excel audit file.
-    Populated by BaseExtractor.extract() and persisted by the task layer.
-    """
-
-    # Source
-    file_name:  str
-    sheet_name: str = ""
-
-    # Identity / header
-    factory:         str = ""
-    client:          str = ""
-    date_of_issue:   str = ""   # always injected from batch — never extracted
-    inspection_type: str = ""
-    audit_report:    str = ""   # Bug #3 restored: separate audit-report-number field
-    item_name:       str = ""
-    style_no:        str = ""
-    po_no:           str = ""
-    country:         str = ""
-
-    # Time fields
-    factory_in_time:     str = ""
-    factory_out_time:    str = ""
-    factory_total_hours: str = ""
-    audit_start_time:    str = ""
-    audit_end_time:      str = ""
-    audit_total_hours:   str = ""
-
-    # Audit outcome
-    audit_result: str = "-"
-
-    # Quantity fields
-    po_qty:      str = ""
-    po_qty_pcs:  int = 0
-    po_qty_pack: int = 0
-    po_qty_set:  int = 0
-    do_qty:      int = 0
-    ship_qty:    str = ""
-    audit_qty:   str = ""
-
-    # Shipment dates
-    exf:      str = ""
-    po_edt:   str = ""
-    po_wh:    str = ""
-    plan_edt: str = ""
-    plan_wh:  str = ""
-
-    # Defect summary
-    defect_qty:            str = ""
-    acceptable_defect_qty: str = "-"
-    defect_percentage:     str = ""
-
-    # Personnel
-    person:    str = ""
-    inspector: str = ""
-
-    # Additional checks
-    carton:          str = ""
-    needle_detector: str = ""
-    remarks:         str = ""
-    do_set_col_size: str = ""
-
-    # Extracted names (for cross-check against pair registration)
-    factory_extracted: str = ""
-    client_extracted:  str = ""
-
-    # Structured data
-    defect_rows: List[Dict[str, Any]] = field(default_factory=list)
-    do_orders:   List[Dict[str, Any]] = field(default_factory=list)
-    do_totals:   Dict[str, Any]       = field(default_factory=dict)
-    do_note:     str                  = ""
-
-    # Validation
-    validation_errors:    List[str] = field(default_factory=list)
-    blocking_errors:      List[str] = field(default_factory=list)
-    cross_check_warnings: List[str] = field(default_factory=list)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
 
 
 # ---------------------------------------------------------------------------
@@ -207,10 +122,12 @@ class BaseExtractor:
             df   = self._read_sheet(path, sheet_name)
             grid = CellGrid(df)
         except Exception as exc:
-            record.blocking_errors.append(
-                f"SHEET_READ_ERROR | Cannot read sheet '{sheet_name}': {exc}"
-            )
+            record.blocking_errors.append(f"SHEET_READ_ERROR | Cannot read sheet '{sheet_name}': {exc}")
             return record
+        
+        # ── Step 2: save buyer and factory from the pair ────────────────────────────────────
+        record.factory = pair.factory.name.strip()
+        record.client = pair.buyer.name.strip()
 
         # ── Step 2: single-value fields ────────────────────────────────────
         # BUG FIX #1: pass `path` as the second positional argument so that
@@ -228,62 +145,23 @@ class BaseExtractor:
                 else:
                     logger.info(f"  [{field_name}] -> Not found on primary sheet")
             except Exception as exc:
-                logger.error(
-                    f"[{path.name}] Field '{field_name}' extraction EXCEPTION: {exc}"
-                )
+                logger.error(f"[{path.name}] Field '{field_name}' extraction EXCEPTION: {exc}")
 
-        # ── Step 3: style_no + country ─────────────────────────────────────
-        try:
-            style, country = self._extract_style_country(grid, path)
-            if style:
-                record.style_no = style
-                record.country  = country
-                logger.info(f"  [style_no] -> '{style}'")
-                logger.info(f"  [country] -> '{country}'")
-            else:
-                logger.info(f"  [style_no] -> Not found on primary sheet")
-        except Exception as exc:
-            logger.error(f"[{path.name}] style/country extraction FAILED: {exc}")
+        # ── Step 3: style_no and item name  ──────────────────────────────────────────────
+        record.style_no = process_extraction(grid, path, record, self._extract_style, name='Style')
+        record.item_name = process_extraction(grid, path, record, self._extract_item, name='Style')
 
         # ── Step 4: times ──────────────────────────────────────────────────
-        try:
-            times = self._extract_times(grid, path)
-            for k, v in times.items():
-                if v and str(v).strip():
-                    setattr(record, k, v)
-                    logger.info(f"  [{k}] -> '{v}'")
-        except Exception as exc:
-            logger.error(f"[{path.name}] Times extraction FAILED: {exc}")
+        process_extraction(grid, path, record, self._extract_times, 'Time')
 
         # ── Step 5: dates ──────────────────────────────────────────────────
-        try:
-            dates = self._extract_dates(grid, path)
-            for k, v in dates.items():
-                if v and str(v).strip():
-                    setattr(record, k, v)
-                    logger.info(f"  [{k}] -> '{v}'")
-        except Exception as exc:
-            logger.error(f"[{path.name}] Dates extraction FAILED: {exc}")
+        process_extraction(grid, path, record, self._extract_dates, 'Date')
 
         # ── Step 6: quantities ─────────────────────────────────────────────
-        try:
-            qtys = self._extract_quantities(grid, path, self.REPORT_TYPE)
-            for k, v in qtys.items():
-                if v and str(v).strip():
-                    setattr(record, k, v)
-                    logger.info(f"  [{k}] -> '{v}'")
-        except Exception as exc:
-            logger.error(f"[{path.name}] Quantities extraction FAILED: {exc}")
-
+        process_extraction(grid, path, record, self._extract_quantities, 'Quantitys', self.REPORT_TYPE)
+        
         # ── Step 7: personnel ──────────────────────────────────────────────
-        try:
-            pers = self._extract_personnel(grid, path)
-            for k, v in pers.items():
-                if v and str(v).strip():
-                    setattr(record, k, v)
-                    logger.info(f"  [{k}] -> '{v}'")
-        except Exception as exc:
-            logger.error(f"[{path.name}] Personnel extraction FAILED: {exc}")
+        process_extraction(grid, path, record, self._extract_personnel, 'Person')
 
         # ── Step 7b: fill missing fields from other sheets ─────────────────
         try:
@@ -344,6 +222,11 @@ class BaseExtractor:
 
         # ── Inspection type fallback from file name ────────────────────────
         if not record.inspection_type:
+            if not record.audit_qty and not record.ship_qty:
+                need_quantities = not any([
+                    record.po_qty, record.ship_qty, record.audit_qty,
+                    record.defect_qty,
+                ])
             record.inspection_type = extract_type_from_filename(
                 path.stem,
                 audit_qty=record.audit_qty,
@@ -354,11 +237,20 @@ class BaseExtractor:
             )
 
         # ── Step 11: format-specific post-processing ───────────────────────
-        record = self.post_process(record, grid, path)
+        # Capture raw sheet text for factory/client BEFORE post_process
+        # overwrites record.factory/client with the registered pair's
+        # canonical names — that overwrite is what post_process does by
+        # design, but it means the comparison in step 12 has to happen
+        # against this raw snapshot, not against record.factory/client.
+        raw_factory, raw_client = self._find_raw_identity(grid)
 
         # ── Step 12: cross-check vs pair registration ──────────────────────
+        # NOTE: _crosscheck mutates record.cross_check_warnings in place and
+        # must not be assigned back over `record` — a stub implementation
+        # that forgot to `return record` previously replaced the fully
+        # extracted record with None here, silently failing every upload.
         if pair:
-            record = self._crosscheck(record, pair)
+            self._crosscheck(record, pair, raw_factory, raw_client)
 
         return record
 
@@ -507,6 +399,43 @@ class BaseExtractor:
                     record.do_set_col_size,
                 ])
 
+    def _find_raw_identity(self, grid: CellGrid) -> tuple[str, str]:
+        """
+        Best-effort, non-blocking read of whatever factory/buyer text is
+        printed on the sheet itself — used only for _crosscheck. Returns
+        ("", "") if the sheet doesn't expose these as labeled cells; that
+        is expected for some templates and is not an error.
+
+        Uses an EXACT normalised match rather than CellGrid's usual
+        find_label_positions() (which also matches by prefix) — a prefix
+        match on "factory" would also catch "Factory In Time" / "Factory
+        Out Time", which exist on every template, and grab a time value
+        for comparison instead of a factory name. That would make this
+        check fire a false mismatch on nearly every file.
+        """
+        from final_summary.extraction.core import (
+            find_inline_value, resolve_value, normalize_text, DirectionRule,
+        )
+
+        factory_synonyms = ["factory name", "factory"]
+        client_synonyms  = ["buyer", "client", "brand"]
+
+        def _search(synonyms: list[str]) -> str:
+            normalised_synonyms = {normalize_text(s) for s in synonyms}
+            for row, col, cell_text in grid.iter_cells():
+                if normalize_text(cell_text) not in normalised_synonyms:
+                    continue
+                for syn in synonyms:
+                    value = find_inline_value(syn, cell_text)
+                    if value:
+                        return value
+                value = resolve_value(grid, (row, col), DirectionRule.RIGHT)
+                if value:
+                    return value
+            return ""
+
+        return _search(factory_synonyms), _search(client_synonyms)
+
     def _read_sheet(self, path: Path, sheet_name: str):
         """Load the sheet DataFrame. Override to apply skiprows etc."""
         return read_sheet(path, sheet_name=sheet_name)
@@ -518,8 +447,11 @@ class BaseExtractor:
         """
         return FIELD_EXTRACTORS.copy()
 
-    def _extract_style_country(self, grid: CellGrid, path: Path) -> Tuple[str, str]:
-        return extract_with_country(grid, path)
+    def _extract_style(self, grid: CellGrid, path: Path) -> str:
+        return extract_style_no(grid, path)
+    
+    def _extract_item(self, grid: CellGrid, path: Path) -> str:
+        return extract_item_name(grid, path)
 
     def _extract_times(self, grid: CellGrid, path: Path) -> dict:
         return extract_times(grid, path)
@@ -562,13 +494,16 @@ class BaseExtractor:
         record: AuditRecord,
         grid: CellGrid,
         path: Path,
+        pair,
     ) -> AuditRecord:
         """
         Format-specific post-processing hook.
         Override in subclasses to apply layout-specific corrections.
         Default implementation applies the remarks fallback parser.
-        """
+        """        
+        
         self._parse_remarks_fallback(record)
+
         return record
 
     def _parse_remarks_fallback(self, record: AuditRecord) -> None:
@@ -611,14 +546,6 @@ class BaseExtractor:
             if m:
                 record.audit_qty = m.group(1)
 
-        if not record.report_no:
-            m = re.search(r"RE-FINAL AUDIT\s*-\s*(\d+)", text)
-            if m:
-                record.report_no = m.group(1)
-            else:
-                m = re.search(r"AUDIT\s*-\s*(\d+)", record.file_name.upper())
-                if m:
-                    record.report_no = m.group(1)
 
         if not record.person:
             m = re.search(r"(\d+)\s*PERSON", text)
@@ -629,45 +556,24 @@ class BaseExtractor:
     # Cross-check
     # ------------------------------------------------------------------
 
-    def _crosscheck(self, record: AuditRecord, pair) -> AuditRecord:
+    def _crosscheck(self, record: AuditRecord, pair, raw_factory: str = "", raw_client: str = "") -> None:
         """
         Compare extracted factory/client names against the registered pair.
         Mismatches are non-blocking — they go to cross_check_warnings.
         """
-        record.factory_extracted = record.factory
-        record.client_extracted  = record.client
+        def _norm(s: str) -> str:
+            return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
-        registered_factory = pair.factory.name.strip().lower()
-        registered_buyer   = pair.buyer.name.strip().lower()
+        if raw_factory and pair.factory and pair.factory.name:
+            if _norm(raw_factory) not in _norm(pair.factory.name) and _norm(pair.factory.name) not in _norm(raw_factory):
+                record.cross_check_warnings.append(
+                    f"FACTORY_MISMATCH | sheet says '{raw_factory}' but pair is "
+                    f"registered as '{pair.factory.name}'"
+                )
 
-        extracted_factory = record.factory.strip().lower()
-        extracted_client  = record.client.strip().lower()
-
-        if extracted_factory and extracted_factory != registered_factory:
-            warn = (
-                f"FACTORY_MISMATCH | "
-                f"extracted='{record.factory}' "
-                f"registered='{pair.factory.name}'"
-            )
-            record.cross_check_warnings.append(warn)
-            logger.error(f"[{record.file_name}] {warn}")
-
-        if extracted_client and extracted_client != registered_buyer:
-            warn = (
-                f"CLIENT_MISMATCH | "
-                f"extracted='{record.client}' "
-                f"registered='{pair.buyer.name}'"
-            )
-            record.cross_check_warnings.append(warn)
-            logger.error(f"[{record.file_name}] {warn}")
-
-        logger.info(f"  [factory_extracted] -> '{record.factory_extracted}'")
-        logger.info(f"  [client_extracted] -> '{record.client_extracted}'")
-        logger.info(f"  [factory] -> '{pair.factory.name}' (canonical)")
-        logger.info(f"  [client] -> '{pair.buyer.name}' (canonical)")
-
-        # Use registered names as the canonical values
-        record.factory = pair.factory.name
-        record.client  = pair.buyer.name
-
-        return record
+        if raw_client and pair.buyer and pair.buyer.name:
+            if _norm(raw_client) not in _norm(pair.buyer.name) and _norm(pair.buyer.name) not in _norm(raw_client):
+                record.cross_check_warnings.append(
+                    f"CLIENT_MISMATCH | sheet says '{raw_client}' but pair is "
+                    f"registered as '{pair.buyer.name}'"
+                )

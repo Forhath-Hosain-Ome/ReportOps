@@ -1,10 +1,13 @@
+# backend/image_processor/views/folder_upload_view.py
 import logging
 import os
 import uuid
-from pathlib import Path
+import errno
+import shutil
+from pathlib import Path, PurePosixPath
 
-from django.conf import settings
 from rest_framework import status
+from rest_framework.exceptions import ValidationError
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -12,24 +15,22 @@ from rest_framework.views import APIView
 from django.db import transaction
 
 from image_processor.serializers import FolderUploadSerializer
+from image_processor.archive_upload import ArchiveValidationError, stage_archive
+from image_processor.output_paths import OutputPathError, validate_report_date
 from image_processor.models import FolderBatch
+from image_processor.lifecycle import create_intake, publish_dispatch
+from image_processor.retention_paths import staging_root
 from image_processor.tasks import process_folder_task
+from utils import normalize_filename
+from image_processor.upload_paths import (
+    open_upload_file,
+    validate_upload_destinations,
+    validate_preparation_destinations,
+    contained_upload_path,
+)
 
 logger = logging.getLogger(__name__)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#     FOLDER UPLOAD
-#     POST /image/folder/upload/
-#     Accepts multipart/form-data with:
-#       - files: one or many image files
-#       - paths: relative paths for each file (preserves folder structure)
-#       - date:  inspection date string (from calendar picker)
-#       - style: optional style name override
-#
-#     Saves files to a temp folder preserving the folder structure,
-#     creates a FolderBatch row, fires the Celery task, returns batch info.
-# ─────────────────────────────────────────────────────────────────────────────
 
 class FolderUploadView(APIView):
     permission_classes = [IsAuthenticated]
@@ -47,97 +48,103 @@ class FolderUploadView(APIView):
             raise
 
     def post(self, request):
-        files = request.FILES.getlist("files")
-        # Support both "paths" and "paths[]" keys from different JS FormData styles
-        paths = request.POST.getlist("paths") or request.POST.getlist("paths[]")
-        date  = request.POST.get("date", "").strip()
-        style = request.POST.get("style", "").strip()
+        files           = request.FILES.getlist("files")
+        paths           = request.POST.getlist("paths") or request.POST.getlist("paths[]")
+        try:
+            date = validate_report_date(request.POST.get("date", ""))
+        except OutputPathError:
+            return Response({"code": "invalid_date", "detail": "Use a valid YYYY-MM-DD date or leave it blank."}, status=400)
+        style           = request.POST.get("style", "").strip()
         is_renamed_file = request.POST.get("is_renamed_file") == "true"
+        archives = request.FILES.getlist("archive")
+        if "archive" in request.data and (
+            len(archives) != 1 or len(request.data.getlist("archive")) != 1
+            or "files" in request.data or "paths" in request.data or "paths[]" in request.data
+        ):
+            return Response({"code": "invalid_upload_mode", "detail": "Submit one archive or files with paths."}, status=400)
 
-        # Normalise path separators
         paths = [p.replace("\\", "/") for p in paths]
 
-        # Validate via serializer
+        # ── Validate + normalize filenames via serializer ─────────────────
         serializer = FolderUploadSerializer(
-            data={"files": files, "paths": paths, "style": style, "is_renamed_file": is_renamed_file}
+            data={
+                "files":           files,
+                "paths":           paths,
+                "style":           style,
+                "is_renamed_file": is_renamed_file,
+            }
         )
-        if not serializer.is_valid():
+        if archives:
+            try:
+                style = serializer.fields["style"].run_validation(style)
+                style = serializer.validate_style(style)
+            except ValidationError:
+                return Response({"code": "invalid_archive", "detail": "Invalid archive style."}, status=400)
+        elif not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        # Use /tmp instead of mounted media volume (which may have host permissions)
-        upload_base = Path("/tmp") / "batch_uploads"
-        upload_base.mkdir(parents=True, exist_ok=True)
-        temp_dir = str(upload_base / str(uuid.uuid4()))
+        validated_files = [] if archives else serializer.validated_data["files"]
+        normalized_paths = [] if archives else serializer.validated_data["paths"]
+        style = style if archives else serializer.validated_data["style"]
+
+        # Preserve the existing saved filenames and logical folder identities.
+        # Plan flat uploads in their final folder, eliminating unsafe renames.
+        destinations = [
+            str(PurePosixPath(path).parent / normalize_filename(file_obj.name))
+            for file_obj, path in zip(validated_files, normalized_paths)
+        ]
+        if all("/" not in path for path in destinations):
+            destinations = [f"{style or 'uploaded'}/{path}" for path in destinations]
+        try:
+            validate_upload_destinations(destinations)
+            validate_preparation_destinations(destinations)
+        except ValidationError:
+            return Response({"code": "upload_destination_conflict", "detail": "Upload names conflict."}, status=400)
+
+        upload_base = staging_root()
+        root_created = False
+        intake_committed = False
 
         try:
-            # ── Save files preserving folder structure ────────────────────
-            for i, file_obj in enumerate(files):
-                relative_path = paths[i] if i < len(paths) else file_obj.name
-                relative_path = relative_path.replace("\\", "/").lstrip("./")
-
-                # Prevent directory traversal
-                safe_path = os.path.normpath(relative_path).lstrip(os.sep)
-                full_path = os.path.join(temp_dir, safe_path)
-
-                os.makedirs(os.path.dirname(full_path), exist_ok=True)
-
-                with open(full_path, "wb+") as dest:
+            upload_base.mkdir(parents=True, exist_ok=True)
+            root = contained_upload_path(upload_base, str(uuid.uuid4()))
+            temp_dir = str(root)
+            # Never reuse a pre-existing directory or follow a planted root link.
+            root.mkdir(mode=0o700)
+            root_created = True
+            manifest = []
+            if archives:
+                manifest = stage_archive(archives[0], root, style)
+            for file_obj, relative_path in zip(validated_files, destinations):
+                with open_upload_file(root, relative_path) as dest:
                     for chunk in file_obj.chunks():
                         dest.write(chunk)
+                manifest.append({"relative_path": relative_path, "original_filename": file_obj.name})
 
-            # ── Discover folders (or fall back to a single default folder) ─
-            folders = [
-                f for f in os.listdir(temp_dir)
-                if os.path.isdir(os.path.join(temp_dir, f))
-            ]
-
-            if not folders:
-                # Files uploaded without a folder structure — create one folder
-                default_folder_name = style or "uploaded"
-                default_folder_path = os.path.join(temp_dir, default_folder_name)
-                os.makedirs(default_folder_path, exist_ok=True)
-
-                for item in os.listdir(temp_dir):
-                    item_path = os.path.join(temp_dir, item)
-                    if os.path.isfile(item_path):
-                        os.rename(item_path, os.path.join(default_folder_path, item))
-
-                folders = [default_folder_name]
+            # ── Discover folders ──────────────────────────────────────────
+            folders = sorted({str(PurePosixPath(item["relative_path"]).parent) for item in manifest})
 
             # ── Create FolderBatch ────────────────────────────────────────
-            batch = FolderBatch.objects.create(
-                created_by    = request.user,
-                total_folders = len(folders),
-                status        = FolderBatch.Status.PENDING,
-                source_folder = temp_dir,
-            )
+            batch = create_intake(request.user, root, manifest, {
+                "date": date, "is_renamed_file": is_renamed_file,
+            })
+            intake_committed = True
 
-            # ── Fire Celery task ──────────────────────────────────────────
-            
-            task_id = None
-
+            # ── Fire Celery task after DB commit ──────────────────────────
             def on_commit_callback():
-                nonlocal task_id
-                result = process_folder_task.delay(
-                    batch.id, temp_dir, date, is_renamed_file=is_renamed_file
-                )
-                batch.celery_task_id = result.id
-                batch.save(update_fields=["celery_task_id"])
-                logger.info(
-                    "Folder upload | batch #%s | user: %s | folders: %s | task: %s",
-                    batch.id, request.user.username, folders, result.id,
-                )
+                publish_dispatch(batch.pk, batch.dispatch_generation, batch.dispatch_token, process_folder_task)
 
             transaction.on_commit(on_commit_callback)
-
-           
+            batch.refresh_from_db()
 
             return Response(
                 {
                     "batch_id":      batch.id,
                     "total_folders": len(folders),
-                    "message":       (
-                        f"Uploaded {len(files)} file(s) into "
+                    "submitted_images": len(manifest),
+                    "dispatch_state": batch.dispatch_state,
+                    "message": (
+                        f"Uploaded {len(archives) or len(files)} file(s) into "
                         f"{len(folders)} folder(s). Processing started."
                     ),
                 },
@@ -145,14 +152,28 @@ class FolderUploadView(APIView):
             )
 
         except Exception as exc:
-            logger.exception("Folder upload error: %s", exc)
-            # Clean up temp dir on error (task won't do it since it was never started)
             try:
-                import shutil
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            except Exception:
-                pass
+                if root_created and not intake_committed:
+                    shutil.rmtree(temp_dir)
+            except OSError:
+                logger.warning("Image upload cleanup failed")
+            if isinstance(exc, ArchiveValidationError):
+                return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+            invalid = isinstance(exc, (ValidationError, FileExistsError)) or (
+                isinstance(exc, OSError)
+                and exc.errno in (errno.ELOOP, errno.ENOTDIR, errno.EINVAL, errno.ENAMETOOLONG)
+            )
+            code = "invalid_upload_destination" if invalid else "upload_failed"
+            if isinstance(exc, FileExistsError):
+                code = "upload_destination_conflict"
+            # Exception text/tracebacks can disclose paths: record only safe categories.
+            logger.warning("Image upload failed code=%s error_type=%s", code, type(exc).__name__)
+            if invalid:
+                return Response(
+                    {"code": code, "detail": "Invalid or conflicting upload destination."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             return Response(
-                {"error": f"Upload failed: {exc}"},
+                {"code": code, "error": "Upload failed. Please try again."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )

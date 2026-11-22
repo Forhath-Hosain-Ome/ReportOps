@@ -6,13 +6,14 @@ import { useOutputStore } from "../store/outputStore";
 import {
   uploadBatch,
   fetchBatches,
-  fetchBatch,
+  // fetchBatch,
   fetchBatchLogs,
   fetchErrorJson,
   retryBatch,
   downloadSummary,
   fetchFilterOptions,
 } from "../services/finalSummaryApi";
+import useAuditWs from "../hooks/useAuditWs";
 
 // ── Shared styles ─────────────────────────────────────────────────────────────
 const hdr = {
@@ -31,39 +32,6 @@ const fieldStyle = {
   boxSizing: "border-box",
 };
 
-// ── WS hook for audit batches ─────────────────────────────────────────────────
-function useAuditWs(batchId, { onProgress, onComplete, onError } = {}) {
-  const wsRef  = useRef(null);
-  const cbsRef = useRef({ onProgress, onComplete, onError });
-  useEffect(() => { cbsRef.current = { onProgress, onComplete, onError }; });
-
-  useEffect(() => {
-    if (!batchId) return;
-    const token = useAuthStore.getState().access;
-    if (!token) return;
-    let cancelled = false;
-
-    const proto = window.location.protocol === "https:" ? "wss" : "ws";
-    const url = `${proto}://${window.location.host}/ws/audit-batches/${batchId}/progress/?token=${token}`;
-    const ws = new WebSocket(url);
-    wsRef.current = ws;
-
-    ws.onmessage = (e) => {
-      if (cancelled) return;
-      let msg;
-      try { msg = JSON.parse(e.data); } catch { return; }
-      if (msg.event === "progress") cbsRef.current.onProgress?.(msg);
-      if (msg.event === "complete") { cbsRef.current.onComplete?.(msg); ws.close(1000); }
-      if (msg.event === "error")    cbsRef.current.onError?.(msg);
-    };
-    ws.onerror = () => ws.close();
-
-    return () => {
-      cancelled = true;
-      if (ws.readyState === WebSocket.OPEN) ws.close(1000);
-    };
-  }, [batchId]);
-}
 
 // ── Stage tab button ──────────────────────────────────────────────────────────
 function StageTab({ label, active, onClick, badge }) {
@@ -342,7 +310,7 @@ function ExportStage({ lastBatchId, lastCount }) {
         setOptions({ factories: [], clients: [], styles: [], po_numbers: [] });
         setLoading(false);
       });
-  }, [lastBatchId]);
+  }, [lastBatchId, addLog]);
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const canExport = form.factory && form.client && form.date_from && form.date_to;
@@ -550,16 +518,6 @@ function RetryStage({ lastBatchId, onRetryComplete }) {
       console.error("No errorData");
       return;
     }
-    const safeStringify = (obj) => {
-      const seen = new WeakSet();
-      return JSON.stringify(obj, (key, value) => {
-        if (typeof value === "object" && value !== null) {
-          if (seen.has(value)) return "[Circular]";
-          seen.add(value);
-        }
-        return value;
-      }, 2);
-    };
     
     const blob = new Blob([JSON.stringify(errorData, null, 2)], { type: "application/json" });
     const url  = URL.createObjectURL(blob);
@@ -915,31 +873,60 @@ function LogsStage({ lastBatchId }) {
 // Batch history sidebar
 // ════════════════════════════════════════════════════════════════════════════════
 function BatchHistory({ refreshKey, onSelectBatch }) {
-   const [batches, setBatches] = useState([]);
+  const [batches, setBatches] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const user = useAuthStore(state => state.user);
 
   useEffect(() => {
+    const abortController = new AbortController();
+
+    if (!user?.user_id) {
+      setBatches([]);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+
     setLoading(true);
-    fetchBatches()
+    setError(null);
+
+    fetchBatches({ signal: abortController.signal })
       .then(data => {
+        if (abortController.signal.aborted) return;
+
         let list = Array.isArray(data)
           ? data
           : Array.isArray(data?.results)
           ? data.results
           : [];
         // Filter batches to only show those created by the logged-in user
-        const user = useAuthStore.getState().user;
-        if (user?.user_id) {
-          list = list.filter(b => b.created_by && b.created_by.id === user.user_id);
-        }
+        
+        
+        list = list.filter(b => b.created_by && b.created_by.id === user.user_id);
+        
         setBatches(list);
         setLoading(false);
       })
-      .catch(() => {
+      .catch(err => {
+        if (abortController.signal.aborted) return;
+        if (typeof addLog !== 'undefined') {
+          addLog({ 
+            level: "error", 
+            message: `Failed to fetch batches: ${err.message}` 
+          });
+        } else {
+          // Fallback to console
+          console.error(`Failed to fetch batches: ${err.message}`);
+        }
+        setError(err.message);
         setBatches([]);
         setLoading(false);
       });
-  }, [refreshKey]);
+      return () => {
+      abortController.abort();
+    };
+  }, [refreshKey, user?.user_id]);
 
   const STATUS_COLOR = {
     COMPLETED: "var(--color-success)", PARTIAL: "var(--color-warning)",

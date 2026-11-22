@@ -21,7 +21,7 @@ const WS_BASE_URL = import.meta.env.VITE_WS_URL || null;
  * on the orphaned socket become no-ops. The second cycle opens a fresh socket
  * that lives for the full lifetime of the component.
  */
-export function useWsProgress(batchId, { onProgress, onComplete, onError } = {}) {
+export function useWsProgress(batchId, { onProgress, onComplete, onError, source = "puma" } = {}) {
   const wsRef    = useRef(null);
   const timerRef = useRef(null);
 
@@ -44,9 +44,10 @@ export function useWsProgress(batchId, { onProgress, onComplete, onError } = {})
     let isCancelled = false;
 
     const wsBase = WS_BASE_URL ? WS_BASE_URL.replace(/\/+$/g, "") : null;
+    const namespace = source === "image" ? "image/batches" : "batches";
     const url = wsBase
-      ? `${wsBase}/batches/${batchId}/progress/?token=${token}`
-      : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws/batches/${batchId}/progress/?token=${token}`;
+      ? `${wsBase}/${namespace}/${batchId}/progress/?token=${token}`
+      : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws/${namespace}/${batchId}/progress/?token=${token}`;
 
     const openSocket = () => {
       if (isCancelled) return;
@@ -96,5 +97,5 @@ export function useWsProgress(batchId, { onProgress, onComplete, onError } = {})
       }
       wsRef.current = null;
     };
-  }, [batchId]); // only reconnect when the batch actually changes
+  }, [batchId, source]); // only reconnect when the batch actually changes
 }

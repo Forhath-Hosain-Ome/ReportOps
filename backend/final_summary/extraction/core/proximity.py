@@ -245,22 +245,23 @@ def resolve_po_or_report_number(
     Extract and validate a PO or Report number from cells to the right of the label.
 
     field_name controls which pattern is accepted:
-      "po_no"        → only PO pattern   (P0726-482920-005)
-      "report_no"    → only Report pattern (EU26-02CIPL-001)
+      "po_no"        → only PO pattern   (starts with P, follows P####-######-### format)
+      "report_no"    → only Report pattern (does NOT start with P)
     """
+    import re
+    import logging
+    
     row, col = label_pos
     
-    # Shared regex patterns for internal searching
-    REPORT_PAT = r"[A-Z]{1,2}\s*\d{0,2}\s*[-\s]?\s*\d{2}\s*[-/]?\s*[A-Z0-9]{2,}\s*[-/]?\s*\d+"
-    PO_PAT     = r"P\d{0,4}[-\s]?\d{6}-\d{3}(?:-\d+)*"
+    # Strict patterns for validation
+    PO_PATTERN = re.compile(r'^P\d{0,4}[-\s]?\d{6}-\d{3}(?:-\d+)*$', re.IGNORECASE)
+    # Report pattern: any alphanumeric with hyphens that doesn't start with P
+    REPORT_PATTERN = re.compile(r'^[A-OR-Z][A-Z0-9]*[-/\s]?[A-Z0-9]+[-/\s]?[A-Z0-9]+$', re.IGNORECASE)
     
-    # 1. Search Right (including the label cell itself for inline values)
-    # 2. Search Down (BABL formats often put the value below the label)
+    # Search coordinates (right then down)
     search_coords = []
-    # Right: (row, col) to (row, col+9)
     for c in range(col, min(col + 10, grid.ncols)):
         search_coords.append((row, c))
-    # Down: (row+1, col) to (row+5, col)
     for r in range(row + 1, min(row + 6, grid.nrows)):
         search_coords.append((r, col))
 
@@ -269,33 +270,38 @@ def resolve_po_or_report_number(
         if not raw_val:
             continue
         
-        value = str(raw_val).strip()
-
-        # Strictly check for the requested pattern. 
-        # If po_no is looking at a Report No label, this will correctly fail and return ""
-        if field_name == "report_no":
-            match_r = re.search(REPORT_PAT, value, re.IGNORECASE)
-            if match_r:
-                found = match_r.group(0).rstrip(".,;:")
-                logging.debug(f"PO_OR_REPORT: Found Report No '{found}' at ({r_idx}, {c_idx})")
-                return found
+        value = str(raw_val).strip().rstrip(".,;:")
+        if not value:
+            continue
         
+        # PO validation: must start with 'P' and match the pattern
         if field_name == "po_no":
-            match_p = re.search(PO_PAT, value, re.IGNORECASE)
-            if match_p:
-                found = match_p.group(0)
-                logging.debug(f"PO_OR_REPORT: Found PO No '{found}' at ({r_idx}, {c_idx})")
-                return found
+            if PO_PATTERN.match(value):
+                logging.debug(f"PO_OR_REPORT: Found PO No '{value}' at ({r_idx}, {c_idx})")
+                return value
+            # Also check if it starts with P but might have extra spaces
+            elif value.upper().startswith('P'):
+                # Clean up and try again
+                cleaned = value.replace(' ', '').replace('\t', '')
+                if PO_PATTERN.match(cleaned):
+                    logging.debug(f"PO_OR_REPORT: Found PO No '{cleaned}' at ({r_idx}, {c_idx})")
+                    return cleaned
+        
+        # Report validation: must NOT start with 'P'
+        elif field_name == "report_no":
+            if not value.upper().startswith('P'):
+                # Must have some alphanumeric content
+                if any(c.isalnum() for c in value):
+                    logging.debug(f"PO_OR_REPORT: Found Report No '{value}' at ({r_idx}, {c_idx})")
+                    return value
 
     logging.debug(f"PO_OR_REPORT: nothing found in proximity for '{field_name}'")
     return ""
-
-
 # ---------------------------------------------------------------------------
 # PO W/H special handler  (date may be split across 3 cells: MM | DD | YYYY)
 # ---------------------------------------------------------------------------
 
-def resolve_po_wh_value(grid: CellGrid, label_pos: Tuple[int, int]) -> str:
+def date_table(grid: CellGrid, label_pos: Tuple[int, int]) -> str:
     """
     Extract a date value that may be split across up to 3 adjacent cells.
 
@@ -321,11 +327,20 @@ def resolve_po_wh_value(grid: CellGrid, label_pos: Tuple[int, int]) -> str:
 
     # Format 1: full date already in one cell
     if is_date_format(first_val):
-        return first_val
+        # return first_val
+        # Excel stores dates as DD/MM/YYYY in this format.
+        # Reorder to MM/DD/YYYY so to_display_date() parses correctly.
+        parts = re.split(r"[-/]", first_val)
+        if len(parts) == 3:
+            dd, mm, yyyy = parts[0], parts[1], parts[2]
+            # Confirm it really is DD/MM/YYYY by checking day > 12 OR just always reorder
+            # (safe because we know the column order is always D|M|Y)
+            return f"{mm}/{dd}/{yyyy}"
+        return first_val  # unexpected format, pass through
 
     # Format 2: date split across three cells (MM | DD | YYYY)
     if is_valid_month_or_day(first_val):
-        mm = first_val
+        dd = first_val
 
         second_col = None
         second_val = ""
@@ -337,9 +352,9 @@ def resolve_po_wh_value(grid: CellGrid, label_pos: Tuple[int, int]) -> str:
                 break
 
         if not second_val or not is_valid_month_or_day(second_val):
-            return mm
+            return dd
 
-        dd = second_val
+        mm = second_val
 
         third_val = ""
         for c in range(second_col + 1, min(second_col + 5, grid.ncols)):
@@ -352,6 +367,3 @@ def resolve_po_wh_value(grid: CellGrid, label_pos: Tuple[int, int]) -> str:
             return f"{mm}/{dd}"
 
         return f"{mm}/{dd}/{third_val}"
-
-    # Format 3: non-date value — return as-is
-    return first_val

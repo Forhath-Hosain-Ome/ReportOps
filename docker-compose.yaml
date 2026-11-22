@@ -73,7 +73,7 @@ services:
       # - ./media:/app/media
       # - ./logs:/app/logs
     env_file:
-      - .env                         # secrets stay out of compose file
+      - ./backend/.env                         # secrets stay out of compose file
     environment:
       - DJANGO_SETTINGS_MODULE=summary_backend.settings
       - POSTGRES_HOST=postgres
@@ -100,11 +100,11 @@ services:
       dockerfile: Dockerfile
     container_name: celery-worker
     volumes:
-      - ./backend/media:/app/media
+      - media_data:/app/media
       - ./backend/logs:/app/logs
       - batch_uploads:/tmp/batch_uploads  # shared temp storage for celery tasks
     env_file:
-      - .env
+      - ./backend/.env 
     environment:
       - DJANGO_SETTINGS_MODULE=summary_backend.settings
       - POSTGRES_HOST=postgres
@@ -133,7 +133,7 @@ services:
     volumes:
       - ./backend/logs:/app/logs
     env_file:
-      - .env
+      - ./backend/.env
     environment:
       - DJANGO_SETTINGS_MODULE=summary_backend.settings
       - POSTGRES_HOST=postgres

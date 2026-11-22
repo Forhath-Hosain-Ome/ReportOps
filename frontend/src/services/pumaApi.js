@@ -1,4 +1,11 @@
-import puma_api from "../lib/puma_api";
+import axios from "axios";
+import { attachInterceptors } from "./apiClient";
+
+const puma_api = attachInterceptors(
+  axios.create({
+    baseURL: "/puma/",
+  })
+);
 
 
 // ── Batches ───────────────────────────────────────────────────────────────────

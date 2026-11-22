@@ -20,11 +20,9 @@ base format extractor.
 """
 
 # ── Single-value extractors ────────────────────────────────────────────────
-from .factory_name    import extract as extract_factory
-from .client          import extract as extract_client
 from .report_no       import extract as extract_report_no
 from .item_name       import extract as extract_item_name
-from .style_no        import extract as extract_style_no, extract_with_country
+from .style_no        import extract as extract_style_no
 from .po_no           import extract as extract_po_no
 from .inspection_type import extract as extract_inspection_type
 from .inspection_type import extract_from_filename as extract_type_from_filename
@@ -39,6 +37,8 @@ from .personnel  import extract as extract_personnel
 from .defects  import extract as extract_defects
 from .do_table import extract as extract_do_table
 
+from .country import get_country
+
 # ---------------------------------------------------------------------------
 # FIELD_EXTRACTORS registry
 #
@@ -49,8 +49,6 @@ from .do_table import extract as extract_do_table
 # ---------------------------------------------------------------------------
 
 FIELD_EXTRACTORS: dict = {
-    "factory":         extract_factory,
-    "client":          extract_client,
     "report_no":       extract_report_no,
     "item_name":       extract_item_name,
     "style_no":        extract_style_no,
@@ -60,12 +58,9 @@ FIELD_EXTRACTORS: dict = {
 
 __all__ = [
     # Single-value
-    "extract_factory",
-    "extract_client",
     "extract_report_no",
     "extract_item_name",
     "extract_style_no",
-    "extract_with_country",
     "extract_po_no",
     "extract_inspection_type",
     "extract_type_from_filename",

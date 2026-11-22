@@ -23,18 +23,19 @@ import logging
 from final_summary.extraction.core import (
     CellGrid,
     DirectionRule,
-    to_hhmm,
+    to_hhmm as _tdtl,
     duration_hhmm,
-    resolve_value,
+    resolve_value as _dtbl,
 )
 logger = logging.getLogger(__name__)
-
+from final_summary.utils import shipment_and_time
 # ---------------------------------------------------------------------------
 # Per-field synonym lists
 # ---------------------------------------------------------------------------
 
 FACTORY_IN_SYNONYMS: list[str] = [
     "factory in time",
+    "factory in-time",
     "factory in",
     "in time",
     "factory intime",
@@ -42,6 +43,7 @@ FACTORY_IN_SYNONYMS: list[str] = [
 
 FACTORY_OUT_SYNONYMS: list[str] = [
     "factory out time",
+    "factory out-time",
     "factory out",
     "out time",
     "factory outtime",
@@ -65,24 +67,7 @@ AUDIT_END_SYNONYMS: list[str] = [
 
 _DIRECTION = DirectionRule.RIGHT
 
-
-# ---------------------------------------------------------------------------
-# Internal helper
-# ---------------------------------------------------------------------------
-
-def _extract_time(grid: CellGrid, synonyms: list[str]) -> str:
-    """
-    Find a time label and return the normalised HH:MM value to its right.
-    Returns "" if nothing found or if the raw value is not a valid time.
-    """
-    for row, col, _ in grid.find_label_positions(synonyms):
-        raw = resolve_value(grid, (row, col), _DIRECTION)
-        if raw:
-            normalised = to_hhmm(raw)
-            if normalised:
-                return normalised
-    return ""
-
+_labelp = CellGrid.find_label_positions
 
 # ---------------------------------------------------------------------------
 # Unified extract() — returns all time fields + derived durations
@@ -107,10 +92,10 @@ def extract(
       audit_start_time, audit_end_time, audit_total_hours
     All values are "HH:MM" strings or "" if not found / not computable.
     """
-    factory_in  = _extract_time(grid, FACTORY_IN_SYNONYMS)
-    factory_out = _extract_time(grid, FACTORY_OUT_SYNONYMS)
-    audit_start = _extract_time(grid, AUDIT_START_SYNONYMS)
-    audit_end   = _extract_time(grid, AUDIT_END_SYNONYMS)
+    factory_in  = shipment_and_time(grid, path, _labelp, _dtbl, _tdtl, FACTORY_IN_SYNONYMS, _DIRECTION)
+    factory_out = shipment_and_time(grid, path, _labelp, _dtbl, _tdtl, FACTORY_OUT_SYNONYMS, _DIRECTION)
+    audit_start = shipment_and_time(grid, path, _labelp, _dtbl, _tdtl, AUDIT_START_SYNONYMS, _DIRECTION)
+    audit_end   = shipment_and_time(grid, path, _labelp, _dtbl, _tdtl, AUDIT_END_SYNONYMS, _DIRECTION)
 
     return {
         "factory_in_time":     factory_in,

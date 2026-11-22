@@ -129,23 +129,6 @@ class DOFieldName(str, Enum):
     PO_BALANCE = "po_balance"
 
 
-# =============================================================================
-# STYLE → COUNTRY MAP
-# =============================================================================
-# Maps the first 2 characters of a style number to a destination country.
-# Update here when new country codes are encountered.
-
-STYLE_COUNTRY_MAP: dict = {
-    "JP": "JAPAN",
-    "CN": "CHINA",
-    "US": "USA",
-    "KR": "KOREA",
-    "EU": "EUROPE",
-    "TW": "TAIWAN",
-    "AU": "AUSTRALIA",
-    "CA": "CANADA",
-    "IN": "INDIA",
-}
 
 
 # =============================================================================
@@ -156,10 +139,12 @@ STYLE_COUNTRY_MAP: dict = {
 
 AUDIT_TYPE_PATTERNS: dict = {
     "RE-FINAL": r"re[-\s]?final",
+    "RE-AUDIT": r"re[-\s]?audit",
     "FINAL":    r"\bfinal\b",
     "INLINE":   r"in[-\s]?line",
     "SAMPLE":   r"sample",
     "CMF":      r"cmf",
+    "RANDOM":   r"random",
 }
 
 

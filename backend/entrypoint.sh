@@ -2,9 +2,9 @@
 
 # 0. Ensure required directories exist with proper permissions
 echo "Setting up directories..."
-if [ "$(stat -c %u /app/media)" != "1001" ]; then
-    chown -R 1001:1001 /app/media /app/logs 2>/dev/null || true
-fi
+APP_UID=${APP_UID:-1001}
+APP_GID=${APP_GID:-1001}
+
 
 # Create all needed directories (in case they don't exist in mounted volume)
 mkdir -p \
@@ -20,16 +20,20 @@ mkdir -p \
  /app/logs/top_five \
  /tmp/batch_uploads
 
-touch /app/logs/app.log
-touch /app/logs/celery.log
 
-# Fix ownership to appuser (UID 1001) - this ensures the container user can write
-chown -R 1001:1001 /app/media /app/logs /tmp/batch_uploads 2>/dev/null || true
+# Fix ownership ONLY if running as root
+if [ "$(id -u)" = "0" ]; then
+    echo "Fixing ownership..."
+    chown -R $APP_UID:$APP_GID /app/media /app/logs /tmp/batch_uploads || true
+fi
 
-chmod -R 777 /app/media
-chmod -R 777 /app/logs
-chmod -R 777 /tmp/batch_uploads
+# Safe permissions (NOT 777)
+chmod -R 775 /app/media /app/logs /tmp/batch_uploads
 
+# Ensure logs exist
+touch /app/logs/app.log /app/logs/celery.log
+
+echo "Directory setup complete"
 
 # 1. Wait for Postgres to be ready (Prevents migration crashes)
 echo "Waiting for database..."

@@ -42,7 +42,7 @@ class Woven78Extractor(BaseExtractor):
            If still empty after extraction, leave as "-" (the default).
         """
         # Ensure report_no is kept as-is even if it's just "01"
-        if not record.carton and record.do_note:
+        if not record.carton and not record.do_note:
             m = re.search(
                 r"our inspection carton\s+no[:\s]+(.+)",
                 record.do_note, re.IGNORECASE
@@ -51,5 +51,13 @@ class Woven78Extractor(BaseExtractor):
                 record.carton = m.group(1).strip()
         if record.report_no and not record.report_no.strip():
             record.report_no = ""
+        if not record.audit_qty:
+            record.audit_qty = int(record.do_orders[0].get("audit_qty") or "")
+        if not record.po_qty:
+            record.po_qty      = int(record.do_orders[0].get("po_qty") or "")
+        if not record.po_qty_pcs and not record.po_qty_pack and not record.po_qty_set:
+            record.po_qty_pcs  = int(record.do_orders[0].get("po_qty") or "")
+            record.po_qty_pack = ""
+            record.po_qty_set  = ""
 
-        return record
+        return super().post_process(record, grid, path)

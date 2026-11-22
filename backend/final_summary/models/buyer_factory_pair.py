@@ -46,14 +46,6 @@ class AvailableReport(models.TextChoices):
 # Ordered list of all valid report choices (used for validation)
 ALL_REPORT_CHOICES = [c.value for c in AvailableReport]
 
-# Template file names keyed by report_type
-TEMPLATE_FILE_MAP: dict[str, str] = {
-    ReportType.KNIT_35:    "General-Final-35.xlsx",
-    ReportType.WOVEN_37:   "General-Final-37.xlsx",
-    ReportType.WOVEN_78:   "SPI-Final-78.xlsx",
-    ReportType.SWEATER_37: "General-Final-37.xlsx",
-}
-
 
 class BuyerFactoryPair(BaseModel):
     """
@@ -64,24 +56,13 @@ class BuyerFactoryPair(BaseModel):
     uploaded and exported for this pair.
     """
 
-    buyer = models.ForeignKey(
-        Buyer,
-        on_delete=models.PROTECT,
-        related_name="pair_set",
-    )
-    factory = models.ForeignKey(
-        Factory,
-        on_delete=models.PROTECT,
-        related_name="pair_set",
-    )
-    report_type = models.CharField(
-        max_length=20,
-        choices=ReportType.choices,
+    buyer = models.ForeignKey(Buyer, on_delete=models.PROTECT, related_name="pair_set")
+    factory = models.ForeignKey( Factory, on_delete=models.PROTECT, related_name="pair_set")
+    report_type = models.CharField(max_length=20, choices=ReportType.choices,
         help_text="Excel template format for this factory.",
     )
     # Stored as a JSON list, e.g. ["FINAL", "RE_FINAL", "INLINE"]
-    available_reports = models.JSONField(
-        default=list,
+    available_reports = models.JSONField(default=list,
         help_text=(
             "Inspection types allowed for this pair. "
             "Choose from: FINAL, RE_FINAL, INLINE, SAMPLE, CMF."
@@ -148,9 +129,31 @@ class BuyerFactoryPair(BaseModel):
     # ------------------------------------------------------------------
 
     @property
-    def template_file(self) -> str:
-        """Return the Excel template filename for this report type."""
-        return TEMPLATE_FILE_MAP.get(self.report_type, "SPI-Final-78.xlsx")
+    def template_coverage(self) -> dict:
+        """
+        Return {stage: filename_or_None} for every stage in
+        available_reports, using the live templates_registry — so admin
+        always shows real coverage instead of a single guessed filename.
+        """
+        from final_summary.templates_registry import TEMPLATE_REGISTRY
+        return {
+            stage: TEMPLATE_REGISTRY.get((self.report_type, stage))
+            for stage in self.available_reports
+        }
+
+    @property
+    def template_file(self) -> str | None:
+        """
+        Best-effort single filename for legacy admin display — the
+        FINAL-stage template if configured, else the first configured
+        stage found. Prefer template_coverage for anything that needs
+        the full picture; a BuyerFactoryPair now maps to N templates
+        (one per stage), not one.
+        """
+        coverage = self.template_coverage
+        if coverage.get("FINAL"):
+            return coverage["FINAL"]
+        return next((f for f in coverage.values() if f), None)
 
     @property
     def defect_column_count(self) -> int:

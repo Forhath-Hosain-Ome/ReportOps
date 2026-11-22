@@ -123,106 +123,27 @@ class BatchProgressConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def _batch_exists(self, pk):
-        try:
-            from puma_summary.models import InspectionBatch
-            from image_processor.models import FolderBatch
-
-            return (
-                InspectionBatch.objects.filter(pk=pk).exists()
-                or FolderBatch.objects.filter(pk=pk).exists()
-            )
-        except RuntimeError as e:
-            if "cannot schedule new futures after interpreter shutdown" in str(e):
-                logger.debug("Skipping batch exists check during shutdown: %s", e)
-                return False
-            else:
-                raise
+        from puma_summary.models import InspectionBatch
+        return InspectionBatch.objects.filter(pk=pk, created_by=self.scope["user"]).exists()
 
     @database_sync_to_async
     def _get_batch_snapshot(self, pk):
-        """
-        Returns a progress/complete payload reflecting the current DB state.
-        Called once on connect so React renders correct initial state.
-        """
-        try:
-            from django.conf import settings
-            from puma_summary.models import InspectionBatch
-            from puma_summary.serializers import BatchFailedPDFSerializer
-            from image_processor.models import FolderBatch
-            from image_processor.serializers import FolderFailedPDFSerializer
-
-            try:
-                batch = (
-                    InspectionBatch.objects
-                    .prefetch_related("batch_failed_pdfs")
-                    .get(pk=pk)
-                )
-                is_folder = False
-            except InspectionBatch.DoesNotExist:
-                try:
-                    batch = (
-                        FolderBatch.objects
-                        .prefetch_related("batch_failed_folders")
-                        .get(pk=pk)
-                    )
-                    is_folder = True
-                except FolderBatch.DoesNotExist:
-                    return None
-
-            done = batch.status in (
-                batch.Status.COMPLETED,
-                batch.Status.PARTIAL,
-                batch.Status.FAILED,
-            )
-
-            if is_folder:
-                base = {
-                    "batch_id":         batch.pk,
-                    "status":           batch.status,
-                    "progress_percent": batch.progress_percent,
-                    "processed":        batch.processed_folders,
-                    "total":            batch.total_folders,
-                    "failed":           batch.failed_folders,
-                    "success_rate":     batch.success_rate,
-                }
-            else:
-                base = {
-                    "batch_id":         batch.pk,
-                    "status":           batch.status,
-                    "progress_percent": batch.progress_percent,
-                    "processed":        batch.processed_pdfs,
-                    "total":            batch.total_pdfs,
-                    "failed":           batch.failed_pdfs,   # integer field — NOT .count()
-                    "success_rate":     batch.success_rate,
-                }
-
-            if done:
-                if is_folder:
-                    failed_details = FolderFailedPDFSerializer(
-                        batch.batch_failed_folders.all(), many=True
-                    ).data
-                    excel_available = False
-                else:
-                    failed_details = BatchFailedPDFSerializer(
-                        batch.batch_failed_pdfs.all(), many=True
-                    ).data
-                    excel_available = False
-                    if batch.excel_report_path:
-                        full = settings.BASE_DIR / "media" / batch.excel_report_path
-                        excel_available = full.exists()
-
-                return {
-                    **base,
-                    "event":           "complete",
-                    "report_count":    batch.reports.count(),
-                    "failed_details":  failed_details,
-                    "excel_available": excel_available,
-                }
-
-            return {**base, "event": "progress", "stage": ""}
-        except RuntimeError as e:
-            if "cannot schedule new futures after interpreter shutdown" in str(e):
-                logger.debug("Skipping batch snapshot during shutdown: %s", e)
-                return None
-            else:
-                raise
+        from django.conf import settings
+        from puma_summary.models import InspectionBatch
+        from puma_summary.serializers import BatchFailedPDFSerializer
+        batch = InspectionBatch.objects.filter(pk=pk, created_by=self.scope["user"]).first()
+        if batch is None:
+            return None
+        done = batch.status in ("COMPLETED", "PARTIAL", "FAILED")
+        base = {
+            "batch_id": batch.pk, "status": batch.status,
+            "progress_percent": batch.progress_percent,
+            "processed": batch.processed_pdfs, "total": batch.total_pdfs,
+            "failed": batch.failed_pdfs, "success_rate": batch.success_rate,
+        }
+        if done:
+            return {**base, "event": "complete", "report_count": batch.reports.count(),
+                    "failed_details": BatchFailedPDFSerializer(batch.batch_failed_pdfs.all(), many=True).data,
+                    "excel_available": bool(batch.excel_report_path and
+                        (settings.BASE_DIR / "media" / batch.excel_report_path).exists())}
+        return {**base, "event": "progress", "stage": ""}

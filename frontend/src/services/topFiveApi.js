@@ -1,4 +1,11 @@
-import top_five_api from "../lib/top_five_api";
+import axios from "axios";
+import { attachInterceptors } from "./apiClient";
+
+const top_five_api = attachInterceptors(
+  axios.create({
+    baseURL: "/top-five/",
+  })
+);
 
 // ── Jobs ──────────────────────────────────────────────────────────────────────
 export const fetchJobs = (params) =>

@@ -13,14 +13,9 @@
  *
  * All stage content is rendered via OutputPanel → AuditOutput (new component).
  */
-
-import { useState } from "react";
-import TopNav        from "../components/layout/TopNav";
-import LogsPanel     from "../components/layout/LogsPanel";
-import ApiMenu       from "../components/layout/ApiMenu";
-import OutputPanel   from "../components/layout/OutputPanel";
 import { useOutputStore } from "../store/outputStore";
 import { useAuthStore }   from "../store/authStore";
+import DashboardLayout from "../components/layout/DashboardLayout";
 import {
   fetchBatches,
   fetchPairOptions,
@@ -30,124 +25,13 @@ import {
   fetchPairs,
 } from "../services/finalSummaryApi";
 
-// ── Sidebar sections ──────────────────────────────────────────────────────────
-const AUDIT_SECTIONS = [
-  {
-    label: "UPLOAD",
-    endpoints: [
-      {
-        id:     "audit-upload",
-        label:  "Upload Excel Files",
-        method: "POST",
-        path:   "/upload/",
-        icon:   "⬆",
-      },
-    ],
-  },
-  {
-    label: "BATCHES",
-    endpoints: [
-      {
-        id:       "audit-batch-list",
-        label:    "List Batches",
-        method:   "GET",
-        path:     "/batches/",
-        icon:     "≡",
-        action:   "list",
-      },
-      {
-        id:     "audit-batch-detail",
-        label:  "Batch Detail",
-        method: "GET",
-        path:   "/batches/<pk>/",
-        icon:   "◎",
-        action: "view",
-      },
-      {
-        id:     "audit-batch-logs",
-        label:  "Batch Logs",
-        method: "GET",
-        path:   "/batches/<pk>/",
-        icon:   "∷",
-        action: "logs",
-      },
-    ],
-  },
-  {
-    label: "EXPORT",
-    endpoints: [
-      {
-        id:     "audit-export",
-        label:  "Download Summary",
-        method: "GET",
-        path:   "/export/",
-        icon:   "⬇",
-      },
-    ],
-  },
-  {
-    label: "RETRY",
-    endpoints: [
-      {
-        id:     "audit-retry-search",
-        label:  "Search Blocked",
-        method: "GET",
-        path:   "/retry/search/",
-        icon:   "⌕",
-      },
-      {
-        id:     "audit-retry-download",
-        label:  "Download Error JSON",
-        method: "GET",
-        path:   "/retry/<pk>/download/",
-        icon:   "⬇",
-        action: "download",
-      },
-      {
-        id:     "audit-retry-upload",
-        label:  "Upload Fixed JSON",
-        method: "POST",
-        path:   "/retry/upload/",
-        icon:   "⬆",
-      },
-    ],
-  },
-  {
-    label: "SETTINGS",
-    endpoints: [
-      {
-        id:     "audit-settings-buyers",
-        label:  "Manage Buyers",
-        method: "GET",
-        path:   "/buyers/",
-        icon:   "◈",
-      },
-      {
-        id:     "audit-settings-factories",
-        label:  "Manage Factories",
-        method: "GET",
-        path:   "/factories/",
-        icon:   "◈",
-      },
-      {
-        id:     "audit-settings-pairs",
-        label:  "Manage Pairs",
-        method: "GET",
-        path:   "/pairs/",
-        icon:   "◈",
-      },
-    ],
-  },
-];
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 export default function AuditSummaryPage() {
   const { user }                          = useAuthStore();
   const { setOutput, setLoading, addLog, clearOutput } = useOutputStore();
-  const [activeId, setActiveId]           = useState(null);
 
   const handleSelect = async (ep) => {
-    setActiveId(ep.id);
 
     switch (ep.id) {
 
@@ -305,18 +189,5 @@ export default function AuditSummaryPage() {
     }
   };
 
-  return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
-      <TopNav />
-      <div style={{ display: "flex", flex: 1, overflow: "hidden", paddingTop: "52px" }}>
-        <LogsPanel />
-        <ApiMenu
-          onSelect={handleSelect}
-          activeId={activeId}
-          sections={AUDIT_SECTIONS}
-        />
-        <OutputPanel />
-      </div>
-    </div>
-  );
+  return <DashboardLayout onSelect={handleSelect} />;
 }

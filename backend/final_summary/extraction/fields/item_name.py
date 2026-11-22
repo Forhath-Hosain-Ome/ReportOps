@@ -23,8 +23,9 @@ from final_summary.extraction.core import (
 SYNONYMS: list[str] = [
     "product description",
     "product name",
-    "item name:",
     "item name",
+    "description",
+    "item",
 ]
 
 DIRECTION = DirectionRule.DOWN
@@ -54,7 +55,6 @@ def extract(grid: CellGrid, path: Optional[Path] = None, format_type: str = "") 
             value = find_inline_value(syn, cell_text)
             if value:
                 return value
-
         value = resolve_value(grid, (row, col), DIRECTION)
         if value:
             return value

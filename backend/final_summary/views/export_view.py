@@ -2,8 +2,13 @@
 ---------------------
 GET /api/final-summary/export/
 
-Generates and streams a filled Excel summary workbook using the pre-built
-template determined by the BuyerFactoryPair.report_type.
+Generates and streams a filled Excel summary workbook. One sheet is
+produced per inspection stage (Final, Re-Final, Random, Inline, ...)
+actually present in the matched records — a factory that only ran
+Inline and Re-Final inspections in the date range gets a 2-sheet file.
+Template selection per (report_type, stage) is entirely owned by
+final_summary/templates_registry.py; this view never touches a
+template filename directly.
 
 Query parameters
 ----------------
@@ -26,9 +31,10 @@ Error responses (JSON)
 ----------------------
   400  missing required params
   404  no records found
-  409  format-type mismatch between records
-  422  defect item(s) have no matching template column
-  500  server / template / generation error
+  409  report_type mismatch between records (e.g. KNIT_35 mixed with WOVEN_37)
+  422  defect item(s) have no matching template column, in any stage
+  424  none of the present stages have a configured template yet
+  500  server / generation error
 """
 
 import logging
@@ -45,17 +51,6 @@ from rest_framework.views import APIView
 from final_summary.models import AuditReport, DefectEntry
 
 logger = logging.getLogger(__name__)
-
-# Template files live here
-TEMPLATE_DIR = Path(settings.BASE_DIR) / "media" / "templates"
-
-# report_type → template filename
-TEMPLATE_MAP: dict[str, str] = {
-    "KNIT_35":    "General-Final-35.xlsx",
-    "WOVEN_37":   "General-Final-37.xlsx",
-    "WOVEN_78":   "SPI-Final-78.xlsx",
-    "SWEATER_37": "General-Final-37.xlsx",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -169,13 +164,6 @@ def _build_writer_data(
 # View
 # ---------------------------------------------------------------------------
 
-TEMPLATE_MAP = {
-    "SPI":     "SPI-Final-78.xlsx",
-    "REGULAR": "General-Final-37.xlsx",
-    "SWEATER": "General-Final-37.xlsx",
-}
-
-
 class AuditExportView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -233,24 +221,24 @@ class AuditExportView(APIView):
         # ── 3. Build writer data ──────────────────────────────────────────
         records, defect_map = _build_writer_data(reports)
 
-        # ── 4. Format mismatch check ──────────────────────────────────────
-        dominant_format, mismatched = _detect_format_mismatch(records)
+        # ── 4. report_type mismatch check ───────────────────────────────────
+        dominant_report_type, mismatched = _detect_format_mismatch(records)
 
         if mismatched:
             return Response(
                 {
                     "detail": (
-                        f"Format-type mismatch: dominant='{dominant_format}' "
+                        f"report_type mismatch: dominant='{dominant_report_type}' "
                         f"but {len(mismatched)} record(s) differ. "
                         f"Fix or skip via the Retry flow before exporting."
                     ),
-                    "dominant_format":    dominant_format,
-                    "mismatch_count":     len(mismatched),
+                    "dominant_report_type": dominant_report_type,
+                    "mismatch_count":       len(mismatched),
                     "mismatched_records": [
                         {
                             "file_name":   r["file_name"],
                             "report_type": r["_report_type"],
-                            "expected":    dominant_format,
+                            "expected":    dominant_report_type,
                         }
                         for r in mismatched
                     ],
@@ -262,17 +250,11 @@ class AuditExportView(APIView):
         for r in records:
             r.pop("_report_type", None)
 
-        # ── 5. Resolve template ───────────────────────────────────────────
-        template_name = TEMPLATE_MAP.get(dominant_format, "SPI-Final-78.xlsx")
-        template_path = TEMPLATE_DIR / template_name
-
-        if not template_path.exists():
-            return Response(
-                {"detail": f"Template '{template_name}' not found on server."},
-                status=500,
-            )
-
-        # ── 6. Generate Excel ─────────────────────────────────────────────
+        # ── 5. Generate Excel ────────────────────────────────────────────
+        # One sheet per stage (Final, Re-Final, Random, Inline, ...) that
+        # is actually present in `records` — template resolution for each
+        # (dominant_report_type, stage) pair happens inside write_summary
+        # via final_summary/templates_registry.py.
         output_dir = Path(settings.BASE_DIR) / "media" / "output" / "final_summary"
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -287,12 +269,13 @@ class AuditExportView(APIView):
 
         try:
             from utils.summary_writer import write_summary, DefectMismatchError
-            write_summary(
+            from final_summary.templates_registry import TemplateNotConfiguredError
+
+            result = write_summary(
                 records=records,
                 defect_items_by_report=defect_map,
                 output_path=output_path,
-                template_path=template_path,
-                format_type=dominant_format,
+                report_type=dominant_report_type,
             )
 
         except DefectMismatchError as exc:
@@ -304,13 +287,30 @@ class AuditExportView(APIView):
                 {
                     "detail": (
                         f"{len(exc.mismatches)} defect item(s) have no matching "
-                        f"column in template '{template_name}'. "
-                        f"These items must exist in the template header row."
+                        f"column in their stage's template. These items must "
+                        f"exist in the template header row."
                     ),
                     "mismatch_count":     len(exc.mismatches),
                     "mismatched_defects": exc.mismatches,
                 },
                 status=422,
+            )
+
+        except TemplateNotConfiguredError as exc:
+            logger.warning(
+                "No usable template for export: report_type=%s stage=%s (%s)",
+                exc.report_type, exc.stage, exc.reason,
+            )
+            return Response(
+                {
+                    "detail": (
+                        f"No export template configured for report_type="
+                        f"'{exc.report_type}' stage='{exc.stage}'. {exc.reason}"
+                    ),
+                    "report_type": exc.report_type,
+                    "stage":       exc.stage,
+                },
+                status=424,
             )
 
         except (FileNotFoundError, ValueError) as exc:
@@ -324,12 +324,15 @@ class AuditExportView(APIView):
                 status=500,
             )
 
-        # ── 7. Stream ─────────────────────────────────────────────────────
+        # ── 6. Stream ─────────────────────────────────────────────────────
         logger.info(
-            "Export OK: factory=%r client=%r %s→%s template=%s records=%d",
-            factory, client, date_from, date_to, template_name, len(records),
+            "Export OK: factory=%r client=%r %s→%s report_type=%s "
+            "stages_written=%s stages_skipped=%s records=%d",
+            factory, client, date_from, date_to, dominant_report_type,
+            result["stages_written"], [s["stage"] for s in result["stages_skipped"]],
+            len(records),
         )
-        return FileResponse(
+        response = FileResponse(
             open(output_path, "rb"),
             as_attachment=True,
             filename=filename,
@@ -338,3 +341,10 @@ class AuditExportView(APIView):
                 ".spreadsheetml.sheet"
             ),
         )
+        if result["stages_skipped"]:
+            # Surface partial-export info without failing the download —
+            # some stages had records but no template yet.
+            response["X-Skipped-Stages"] = ",".join(
+                s["stage"] for s in result["stages_skipped"]
+            )
+        return response
