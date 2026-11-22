@@ -53,6 +53,7 @@ INSTALLED_APPS = [
     'final_summary.apps.FinalSummaryConfig',
     'top_five.apps.TopFiveConfig',
     'mail_download.apps.MailDownloadConfig',
+    'inspection_summary.apps.InspectionSummaryConfig',
     'encrypted_model_fields',
 ]
 
@@ -371,6 +372,10 @@ CELERY_TASK_ROUTES = {
 }
 
 CELERY_BEAT_SCHEDULE = {
+    "inspection-summary-cleanup-hourly": {
+        "task": "inspection_summary.cleanup_expired",
+        "schedule": crontab(minute=15),
+    },
     # Runs every day at 02:00 AM server time
     "cleanup-temp-dirs-daily": {
         "task":     "image_processor.cleanup_temp_dirs",
