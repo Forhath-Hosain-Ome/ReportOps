@@ -2,6 +2,7 @@ import { useAuthStore } from "../../store/authStore";
 import { useNavigate, useLocation } from "react-router-dom";
 
 const SERVICES = [
+  { id: "inspection-summary", label: "INSPECTION SUMMARY", path: "/inspection-summary" },
   { id: "puma", label: "PUMA SUMMARY", path: "/puma" },
   { id: "defect_image", label: "Defect Image", path: "/image" },
   { id: "audit", label: "AUDIT SUMMARY", path: "/audit" },
@@ -18,12 +19,12 @@ function TopNav() {
     <header className="bg-linear-to-br from-slate-900 via-indigo-900 to-slate-950" >
       <nav className="sticky top-4 z-50">
         <div className="mx-auto border border-white/20 bg-white/10 backdrop-blur-xl backdrop-saturate-150 shadow-lg ">
-          <div className="flex items-center justify-between px-6 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4">
             <div className="cursor-pointer text-xl font-bold text-white" onClick={() => navigate("/")}>
               Dashboard
             </div>
             {/* Navigation */}
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               {SERVICES.map((service) => {
                 const active = location.pathname === service.path;
 

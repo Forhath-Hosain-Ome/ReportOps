@@ -16,6 +16,7 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      "/inspection-summary/": { target: apiTarget, changeOrigin: true },
       "/api": { target: apiTarget, changeOrigin: true },
       "/auth": { target: apiTarget, changeOrigin: true },
       "/puma": { target: apiTarget, changeOrigin: true },
