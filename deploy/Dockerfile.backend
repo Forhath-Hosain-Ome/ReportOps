@@ -11,7 +11,7 @@ RUN useradd --uid 1001 --create-home appuser
 WORKDIR /app
 COPY --chown=1001:1001 backend/ /app/
 COPY deploy/entrypoint.sh /usr/local/bin/uqgu-entrypoint
-RUN chmod 755 /usr/local/bin/uqgu-entrypoint && mkdir -p /app/logs /app/media/uploads /app/media/output /tmp/batch_uploads && chown -R 1001:1001 /app /tmp/batch_uploads && chmod 750 /app/media /app/logs /tmp/batch_uploads
+RUN sed -i 's/\r$//' /usr/local/bin/uqgu-entrypoint && chmod 755 /usr/local/bin/uqgu-entrypoint && mkdir -p /app/logs /app/media/uploads /app/media/output /tmp/batch_uploads && chown -R 1001:1001 /app /tmp/batch_uploads && chmod 750 /app/media /app/logs /tmp/batch_uploads
 USER 1001:1001
 RUN python manage.py collectstatic --noinput --settings=summary_backend.settings_collectstatic \
     && test -f /app/staticfiles/admin/css/base.css

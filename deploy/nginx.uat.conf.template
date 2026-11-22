@@ -8,7 +8,7 @@ server {
     root /usr/share/nginx/html;
     index index.html;
     client_max_body_size 500M;
-    location ~ ^/(auth|image|puma|final-summary|top-five|mail-fetch|admin)/ {
+    location ~ ^/(auth|image|puma|inspection-summary|final-summary|top-five|mail-fetch|admin)/ {
         proxy_pass http://$backend_upstream;
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
